@@ -1,0 +1,36 @@
+# --- Python 缓存与编译文件 ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- 虚拟环境 (Virtual Environments) ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- IDE 与编辑器缓存 (Cursor/VS Code/PyCharm) ---
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.bak
+
+# --- 系统临时文件 ---
+.DS_Store
+Thumbs.db
+
+# --- 项目特有的临时/测试文件 ---
+# 过滤掉你提到的 dummy 临时文件
+dummy
+dummy2
+
+# --- 编译好的 GUI 或打包文件 ---
+dist/
+build/
+*.spec
+
+# --- 数据与日志 (可选：如果你不想上传原始数据) ---
+# *.csv
+# *.log
+# data/
