@@ -15,6 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 from importlib import util
 from typing import TYPE_CHECKING
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -39,7 +40,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QFileDialog, QTabWidget, QGridLayout, QFrame,
     QListWidget, QListWidgetItem, QAbstractItemView, QMenu,
     QRadioButton, QButtonGroup, QColorDialog, QTableWidget, QTableWidgetItem,
-    QHeaderView, QInputDialog
+    QHeaderView, QInputDialog, QMenuBar
 )
 
 from src.config.constants import C_H, C_C, C_K, C_CM_TO_HZ
@@ -84,6 +85,11 @@ from src.ui.panels.publication_style_panel import PublicationStylePanel
 from src.ui.panels.spectrum_scan_panel import SpectrumScanPanel
 from src.ui.panels.peak_matching_panel import PeakMatchingPanel
 from src.ui.windows.style_matching_window import StyleMatchingWindow
+# 导入新的 Tab 组件和工具类
+from src.ui.tabs import PlottingSettingsTab, FileControlsTab, PeakDetectionTab, PhysicsTab
+from src.ui.utils.config_binder import ConfigBinder
+from src.services.file_service import FileService
+from src.core.project_save_manager import ProjectSaveManager
 # 注意：多子图配置已删除
 
 # 延迟导入（避免循环依赖）
@@ -115,7 +121,12 @@ except ImportError:
 
 class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMixin):
     def __init__(self):
+        import sys
+        sys.stdout.write("[DEBUG] SpectraConfigDialog.__init__: 开始初始化...\n")
+        sys.stdout.flush()
         super().__init__()
+        sys.stdout.write("[DEBUG] SpectraConfigDialog.__init__: super().__init__()完成\n")
+        sys.stdout.flush()
         self.setWindowTitle("光谱数据处理工作站（GTzhou组 - Pro版）")
         
         # 使用Window类型而不是Dialog，这样最小化后能显示窗口名称
@@ -133,8 +144,9 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         
         self.main_layout = QVBoxLayout(self)
         # 减小整体垂直间距，让各个区域更加紧凑
-        self.main_layout.setSpacing(2) 
-        self.main_layout.setContentsMargins(10, 10, 10, 10) 
+        # 顶部边距设为0，移除菜单栏上方的空白，确保菜单栏紧贴窗口顶部
+        self.main_layout.setContentsMargins(10, 0, 10, 10)
+        self.main_layout.setSpacing(0) 
         
         self.individual_control_widgets = {} 
         self.nmf_component_control_widgets = {}  # NMF组分的独立Y轴控制
@@ -153,6 +165,12 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         self.last_pca_model = None  # 存储训练好的 PCA 模型实例
         self.last_common_x = None  # 存储NMF分析时的波数轴，用于定量分析
         self.nmf_target_component_index = 0  # 存储NMF目标组分索引，默认选择Component 1
+        
+        # 项目存档管理器
+        self.project_save_manager = ProjectSaveManager()
+        self.current_project_path = None  # 当前项目路径
+        self.project_unsaved_changes = False  # 是否有未保存的更改
+        self.auto_save_timer = None  # 自动保存定时器
 
         # 数据增强与光谱匹配相关
         self.library_matcher = None  # 存储 SpectralMatcher 实例
@@ -183,14 +201,136 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         # 字体设置标志（延迟到首次绘图时）
         self._fonts_setup = False
         
-        self.setup_ui()
+        import sys
+        sys.stdout.write("[DEBUG] __init__: 开始调用setup_ui()...\n")
+        sys.stdout.flush()
+        try:
+            self.setup_ui()
+            sys.stdout.write(f"[DEBUG] __init__: setup_ui()完成，主布局子项数量: {self.main_layout.count()}\n")
+            sys.stdout.flush()
+        except Exception as e:
+            sys.stdout.write(f"[ERROR] setup_ui()失败: {e}\n")
+            sys.stdout.flush()
+            import traceback
+            traceback.print_exc()
+            raise
         self._ensure_nmf_marker_defaults()
+        
+        # 确保所有 Tab 已创建，这样控件才能被访问
+        self._ensure_tabs_initialized()
+        sys.stdout.write(f"[DEBUG] __init__: 初始化完成，主布局子项数量: {self.main_layout.count()}\n")
+        sys.stdout.flush()
 
         # 连接所有样式参数的自动更新信号
         self._connect_all_style_update_signals()
 
         # 在所有初始化完成后加载设置
         self.load_settings()
+        
+        # 初始化待恢复的项目数据状态
+        self._pending_project_data_states = None
+        self._pending_project_data = None
+    
+    def _mark_project_changed(self):
+        """标记项目有未保存的更改"""
+        self.project_unsaved_changes = True
+        # 更新窗口标题和项目名称栏显示未保存标记
+        if self.current_project_path:
+            base_title = "光谱数据处理工作站（GTzhou组 - Pro版）"
+            project_name = Path(self.current_project_path).stem
+            self.setWindowTitle(f"{base_title} - {project_name} *")
+        else:
+            base_title = "光谱数据处理工作站（GTzhou组 - Pro版）"
+            self.setWindowTitle(f"{base_title} *")
+    
+    def _mark_project_saved(self):
+        """标记项目已保存"""
+        self.project_unsaved_changes = False
+        # 更新窗口标题和项目名称栏移除未保存标记
+        base_title = "光谱数据处理工作站（GTzhou组 - Pro版）"
+        if self.current_project_path:
+            project_name = Path(self.current_project_path).stem
+            self.setWindowTitle(f"{base_title} - {project_name}")
+        else:
+            self.setWindowTitle(base_title)
+    
+    def mousePressEvent(self, event):
+        """鼠标按下事件 - 使窗口置顶"""
+        super().mousePressEvent(event)
+        self.raise_()
+        self.activateWindow()
+    
+    def _on_plot_window_closed(self, window_name):
+        """绘图窗口关闭时的回调 - 标记项目为已更改"""
+        if window_name in self.plot_windows:
+            # 窗口已关闭，从字典中移除
+            del self.plot_windows[window_name]
+            # 标记项目为已更改
+            self._mark_project_changed()
+    
+    def showEvent(self, event):
+        """窗口显示事件 - 在窗口显示后恢复项目数据状态"""
+        super().showEvent(event)
+        # 确保窗口置顶
+        self.raise_()
+        self.activateWindow()
+        
+        # 如果有待恢复的项目数据状态，现在恢复它们
+        if hasattr(self, '_pending_project_data_states') and self._pending_project_data_states:
+            print("[DEBUG] 窗口已显示，开始恢复项目数据状态...")
+            try:
+                from PyQt6.QtCore import QTimer
+                # 使用定时器延迟执行，确保UI完全初始化
+                QTimer.singleShot(100, lambda: self._restore_pending_project_states())
+            except Exception as e:
+                print(f"[ERROR] 延迟恢复项目状态失败: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    def _restore_pending_project_states(self):
+        """恢复待处理的项目数据状态"""
+        try:
+            if not hasattr(self, '_pending_project_data_states') or not self._pending_project_data_states:
+                return
+            
+            print("[DEBUG] 开始恢复待处理的项目数据状态...")
+            
+            # 恢复PlotConfig到UI
+            if hasattr(self, '_pending_project_data') and 'plot_config' in self._pending_project_data:
+                try:
+                    print("[DEBUG] 更新UI的PlotConfig...")
+                    if hasattr(self, 'publication_style_panel') and self.publication_style_panel:
+                        self.publication_style_panel.load_config()
+                        print("[DEBUG] publication_style_panel已更新")
+                    if hasattr(self, 'peak_matching_panel') and self.peak_matching_panel:
+                        self.peak_matching_panel.load_config()
+                        print("[DEBUG] peak_matching_panel已更新")
+                    if hasattr(self, 'spectrum_scan_panel') and self.spectrum_scan_panel:
+                        self.spectrum_scan_panel.load_config()
+                        print("[DEBUG] spectrum_scan_panel已更新")
+                except Exception as e:
+                    print(f"[ERROR] 更新UI的PlotConfig失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # 恢复数据状态
+            if self._pending_project_data_states:
+                project_data = self._pending_project_data if hasattr(self, '_pending_project_data') else {}
+                self.project_save_manager._restore_data_states(
+                    self._pending_project_data_states, 
+                    self, 
+                    project_data
+                )
+                print("[DEBUG] 数据状态已恢复")
+            
+            # 清除待处理状态
+            self._pending_project_data_states = None
+            self._pending_project_data = None
+            print("[DEBUG] 项目状态恢复完成")
+        except Exception as e:
+            print(f"[ERROR] 恢复待处理的项目状态失败: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _ensure_fonts_setup(self):
         """确保字体已设置（延迟到首次绘图时）"""
@@ -241,6 +381,37 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         if not text: return None
         try: return float(text)
         except ValueError: raise ValueError(f"输入 '{text}' 必须是数字。")
+    
+    def _safe_get_widget_text(self, widget):
+        """安全获取 widget 的文本，如果 widget 已被删除则返回空字符串"""
+        try:
+            if widget is None:
+                return ""
+            # 检查 widget 是否仍然有效
+            if not hasattr(widget, 'text'):
+                return ""
+            return widget.text().strip()
+        except RuntimeError:
+            # widget 已被删除
+            return ""
+        except Exception:
+            return ""
+    
+    def _safe_get_legend_rename_map(self):
+        """安全获取图例重命名映射"""
+        rename_map = {}
+        if not hasattr(self, 'legend_rename_widgets'):
+            return rename_map
+        
+        try:
+            for k, v in list(self.legend_rename_widgets.items()):
+                text = self._safe_get_widget_text(v)
+                if text:
+                    rename_map[k] = text
+        except (RuntimeError, AttributeError):
+            # widgets 已被删除或不存在
+            pass
+        return rename_map
 
     def _ensure_nmf_marker_defaults(self):
         """
@@ -990,40 +1161,51 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
     
     def _on_scan_spectra_requested(self):
         """处理谱线扫描请求"""
-        # 获取最后一次绘图的数据
+        # 获取最后一次绘图的数据（包括图例）
+        plot_data = []
+        
+        # 1. 优先从活动窗口获取数据
         if self.active_plot_window and hasattr(self.active_plot_window, 'current_plot_data'):
-            plot_data = []
             for key, data in self.active_plot_window.current_plot_data.items():
                 if 'x' in data and 'y' in data:
                     plot_data.append({
                         'x': data['x'],
                         'y': data['y'],
                         'label': data.get('label', key),
-                        'color': data.get('color', 'blue')
+                        'color': data.get('color', 'blue'),
+                        'linewidth': data.get('linewidth', 1.2),
+                        'linestyle': data.get('linestyle', '-'),
+                        'type': data.get('type', 'line')
                     })
-            if plot_data:
-                self.spectrum_scan_panel.scan_last_plot(plot_data)
-            else:
-                QMessageBox.warning(self, "警告", "当前绘图窗口没有可扫描的数据")
-        else:
-            # 尝试从所有绘图窗口获取数据
-            found_data = False
+        
+        # 2. 如果活动窗口没有数据，尝试从组间平均对比图获取
+        if not plot_data and "GroupComparison" in self.plot_windows:
+            win = self.plot_windows["GroupComparison"]
+            if win and win.isVisible() and hasattr(win, 'waterfall_plot_data'):
+                plot_data = win.waterfall_plot_data.copy()
+        
+        # 3. 如果还是没有数据，尝试从所有绘图窗口获取
+        if not plot_data:
             for window_name, window in self.plot_windows.items():
                 if window and window.isVisible() and hasattr(window, 'current_plot_data'):
-                    plot_data = []
                     for key, data in window.current_plot_data.items():
                         if 'x' in data and 'y' in data:
                             plot_data.append({
                                 'x': data['x'],
                                 'y': data['y'],
                                 'label': data.get('label', key),
-                                'color': data.get('color', 'blue')
+                                'color': data.get('color', 'blue'),
+                                'linewidth': data.get('linewidth', 1.2),
+                                'linestyle': data.get('linestyle', '-'),
+                                'type': data.get('type', 'line')
                             })
                     if plot_data:
-                        self.spectrum_scan_panel.scan_last_plot(plot_data)
-                        found_data = True
                         break
-            if not found_data:
+        
+        # 4. 扫描数据（包括图例）
+        if plot_data:
+            self.spectrum_scan_panel.scan_last_plot(plot_data)
+        else:
                 QMessageBox.warning(self, "警告", "请先运行绘图，然后再扫描谱线")
     
     def _auto_update_current_plot(self):
@@ -1062,6 +1244,9 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                     if params and 'grouped_files_data' in params:
                         # 更新绘图（会使用params中的样式参数和数据）
                         self.active_plot_window.update_plot(params)
+                        # 保存plot_params以便项目恢复时使用
+                        if self.active_plot_window:
+                            self.active_plot_window._last_plot_params = params.copy()
                     else:
                         # 如果无法准备参数，重新运行完整绘图逻辑
                         self.run_plot_logic()
@@ -1298,27 +1483,135 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
 
     # --- GUI 布局 ---
     def setup_ui(self):
+        import sys
+        sys.stdout.write("[DEBUG] setup_ui: 开始设置UI...\n")
+        sys.stdout.flush()
+        # --- 菜单栏（项目、工具、帮助等）---
+        # 创建一个包装widget来确保菜单栏在正确的位置且可以点击
+        menu_bar_container = QFrame(self)
+        menu_bar_container.setFixedHeight(24)
+        menu_bar_container.setFrameShape(QFrame.Shape.NoFrame)
+        # 使用与窗口一致的背景色，确保没有视觉上的遮挡
+        menu_bar_container.setStyleSheet("background-color: transparent; border: none; margin: 0px; padding: 0px;")
+        menu_bar_container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        menu_bar_layout = QHBoxLayout(menu_bar_container)
+        menu_bar_layout.setContentsMargins(0, 0, 0, 0)
+        menu_bar_layout.setSpacing(0)
+        
+        self.menu_bar = QMenuBar(menu_bar_container)
+        # 设置菜单栏样式，背景透明以融入窗口，字体黑色，紧凑设计
+        # 完全移除所有边框和背景，确保没有灰色条纹或遮挡
+        self.menu_bar.setStyleSheet("""
+            QMenuBar {
+                background-color: transparent;
+                color: black;
+                padding: 0px;
+                margin: 0px;
+                border: none;
+                border-top: none;
+                border-bottom: none;
+                border-left: none;
+                border-right: none;
+            }
+            QMenuBar::item {
+                background-color: transparent;
+                color: black;
+                padding: 4px 12px;
+                border-radius: 0px;
+                margin: 0px;
+            }
+            QMenuBar::item:selected {
+                background-color: #e0e0e0;
+                color: black;
+            }
+            QMenuBar::item:pressed {
+                background-color: #d0d0d0;
+            }
+            QMenu {
+                background-color: white;
+                color: black;
+                border: 1px solid #ccc;
+            }
+            QMenu::item {
+                padding: 8px 32px 8px 16px;
+                color: black;
+            }
+            QMenu::item:selected {
+                background-color: #e0e0e0;
+                color: black;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #ccc;
+                margin: 4px 0;
+            }
+        """)
+        # 设置菜单栏最小高度，使其更紧凑
+        self.menu_bar.setMinimumHeight(24)
+        self.menu_bar.setMaximumHeight(24)
+        # 确保菜单栏可以接收鼠标事件
+        self.menu_bar.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        menu_bar_layout.addWidget(self.menu_bar)
+        menu_bar_layout.addStretch()
+        
+        self._setup_menu_bar()
+        # 对于QDialog，需要将菜单栏容器添加到布局中
+        self.main_layout.addWidget(menu_bar_container)
+        # 设置菜单栏不使用原生菜单栏
+        self.menu_bar.setNativeMenuBar(False)
+        sys.stdout.write(f"[DEBUG] setup_ui: 菜单栏已添加，主布局子项数量: {self.main_layout.count()}\n")
+        sys.stdout.flush()
+        
         # --- 顶部全局控制 (文件 & 数据读取) ---
         top_bar = QFrame()
-        top_bar.setFrameShape(QFrame.Shape.Panel)
-        top_bar.setFrameShadow(QFrame.Shadow.Raised)
+        # 移除顶部边框，避免产生灰色条纹遮挡菜单栏
+        top_bar.setFrameShape(QFrame.Shape.NoFrame)
+        # 设置紧凑的布局，减少高度
         top_bar_layout = QHBoxLayout(top_bar)
+        top_bar_layout.setContentsMargins(5, 2, 5, 2)  # 减小上下边距
+        top_bar_layout.setSpacing(5)
         
         # A. 文件夹选择
         folder_group = QGroupBox("数据文件夹")
-        h_file = QHBoxLayout(folder_group)
+        folder_layout = QVBoxLayout(folder_group)
+        folder_layout.setContentsMargins(6, 6, 6, 6)  # 减小内边距
+        folder_layout.setSpacing(3)  # 减小垂直间距
+        
+        # 第一行：文件夹路径和浏览按钮
+        h_file = QHBoxLayout()
         self.folder_input = QLineEdit()
         self.folder_input.setMinimumWidth(300)  # 设置最小宽度以显示完整路径
+        # 增加输入框高度，使其能显示完整复杂路径
+        self.folder_input.setMinimumHeight(36)  # 增加高度到36
+        self.folder_input.setMaximumHeight(36)
         self.btn_browse = QPushButton("...")
         self.btn_browse.setFixedWidth(40)
+        self.btn_browse.setFixedHeight(36)  # 按钮高度匹配
         self.btn_browse.clicked.connect(self.browse_folder)
         h_file.addWidget(self.folder_input)
         h_file.addWidget(self.btn_browse)
+        folder_layout.addLayout(h_file)
+        
+        # 第二行：项目管理和保存项目按钮
+        project_btn_layout = QHBoxLayout()
+        self.btn_save_project = QPushButton("💾 保存项目")
+        self.btn_save_project.setStyleSheet("font-size: 9pt; padding: 3px; background-color: #4CAF50; color: white; border-radius: 3px;")
+        self.btn_save_project.clicked.connect(self.save_project)
+        self.btn_project_manager = QPushButton("项目管理...")
+        self.btn_project_manager.setStyleSheet("font-size: 9pt; padding: 3px;")
+        self.btn_project_manager.clicked.connect(self.open_project_manager)
+        project_btn_layout.addWidget(self.btn_save_project)
+        project_btn_layout.addWidget(self.btn_project_manager)
+        project_btn_layout.addStretch()
+        folder_layout.addLayout(project_btn_layout)
         
         # B. 文件分组配置
         group_group = QGroupBox("文件分组")
         group_layout = QFormLayout(group_group)
-        group_layout.setSpacing(5)
+        group_layout.setContentsMargins(6, 6, 6, 6)  # 减小内边距
+        group_layout.setSpacing(2)  # 减小垂直间距
+        group_layout.setVerticalSpacing(2)  # 减小表单垂直间距
+        group_layout.setHorizontalSpacing(8)
         
         # 分组前缀长度
         self.n_chars_spin = QSpinBox()
@@ -1333,9 +1626,9 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         self.groups_input.setToolTip("指定要处理的组别，多个组用逗号分隔，留空则处理所有组")
         group_layout.addRow("指定组别 (可选):", self.groups_input)
         
-        # 对照文件
+        # 对照文件（减小高度）
         self.control_files_input = QTextEdit()
-        self.control_files_input.setFixedHeight(40)
+        self.control_files_input.setFixedHeight(32)  # 减小高度从40到32
         self.control_files_input.setPlaceholderText("例如: His (自动识别.txt/.csv等后缀，多个文件用逗号或换行分隔)")
         self.control_files_input.setToolTip("对照文件：这些文件会优先绘制，可用于对比分析")
         group_layout.addRow("对照文件 (优先绘制):", self.control_files_input)
@@ -1349,7 +1642,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         # C. 数据读取 / 跳过行数（自动检测，显示检测结果）
         read_group = QGroupBox("数据读取")
         read_layout = QVBoxLayout(read_group)
-        read_layout.setSpacing(5)
+        read_layout.setContentsMargins(6, 6, 6, 6)  # 减小内边距
+        read_layout.setSpacing(2)  # 减小垂直间距
         
         # 跳过行数控制（紧凑）
         skip_layout = QHBoxLayout()
@@ -1384,6 +1678,9 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         # 初始化跳过行数检测结果
         self.skip_rows_detection_results = {}
         
+        # 初始化 FileService
+        self.file_service = FileService()
+        
         # 将控件添加到top_bar_layout
         top_bar_layout.addWidget(folder_group)
         top_bar_layout.addWidget(group_group)
@@ -1391,6 +1688,9 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         
         # 将top_bar添加到main_layout
         self.main_layout.addWidget(top_bar)
+        import sys
+        sys.stdout.write(f"[DEBUG] setup_ui: top_bar已添加，主布局子项数量: {self.main_layout.count()}\n")
+        sys.stdout.flush()
         
         # --- 主按钮区：两列布局（左侧参数配置，右侧运行绘图）---
         buttons_container = QFrame()
@@ -1497,16 +1797,20 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         self.btn_2dcos.setToolTip("2D-COS分析：基于浓度梯度数据解析重叠峰（如1100 vs 1107 cm⁻¹）")
         right_buttons_layout.addWidget(self.btn_2dcos)
         
-        self.btn_export = QPushButton("💾 导出预处理后数据")
-        self.btn_export.setStyleSheet("font-size: 12pt; padding: 10px;")
-        self.btn_export.clicked.connect(self.export_processed_data)
-        right_buttons_layout.addWidget(self.btn_export)
+        # 导出按钮已移至项目菜单，此处删除
         
         right_buttons_layout.addStretch()
         buttons_layout.addWidget(right_buttons_group)
         
         # 将按钮容器添加到主布局
         self.main_layout.addWidget(buttons_container)
+        import sys
+        sys.stdout.write(f"[DEBUG] setup_ui: buttons_container已添加，主布局子项数量: {self.main_layout.count()}\n")
+        sys.stdout.flush()
+        sys.stdout.write("[DEBUG] setup_ui: UI设置完成\n")
+        sys.stdout.flush()
+        print(f"[DEBUG] setup_ui: buttons_container已添加，主布局子项数量: {self.main_layout.count()}")
+        print("[DEBUG] setup_ui: UI设置完成")
         
         # 设置主布局
         self.setLayout(self.main_layout)
@@ -1709,445 +2013,87 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         window.raise_()
         window.activateWindow()
     
-    # 注意：多子图配置窗口已删除，功能已整合到样式与匹配窗口中
-    def _on_multi_subplot_config_changed(self, window_id, subplot_index):
-        """多子图配置改变时自动更新绘图（已废弃，保留以兼容旧代码）"""
-        # 自动更新对应的窗口
-        if hasattr(self, 'nmf_window') and self.nmf_window and self.nmf_window.isVisible():
-            if hasattr(self.nmf_window, 'style_params') and self.nmf_window.style_params:
-                self.nmf_window.plot_results(self.nmf_window.style_params)
-    
     def _create_plotting_tab_content(self):
         """创建绘图与预处理标签页内容"""
-        # 直接复用原有的 tab 构建函数，返回其内部的 widget
-        return self.setup_plotting_tab()
+        # 使用新的 Tab 组件
+        if not hasattr(self, 'plotting_tab'):
+            self.plotting_tab = PlottingSettingsTab(parent=self)
+            # 为了兼容性，将 Tab 中的控件也添加到主窗口（通过属性访问）
+            for attr_name, widget in self.plotting_tab.get_widgets_dict().items():
+                setattr(self, attr_name, widget)
+        return self.plotting_tab
     
     def _create_file_tab_content(self):
         """创建文件扫描与独立Y轴标签页内容"""
-        return self.setup_file_controls_tab()
+        # 使用新的 Tab 组件
+        if not hasattr(self, 'file_controls_tab'):
+            self.file_controls_tab = FileControlsTab(parent=self)
+            # 连接扫描按钮
+            if hasattr(self.file_controls_tab, 'scan_button'):
+                self.file_controls_tab.scan_button.clicked.connect(self.scan_and_load_file_controls)
+        return self.file_controls_tab
     
     def _create_peak_tab_content(self):
         """创建波峰检测标签页内容"""
-        return self.setup_peak_detection_tab()
+        # 使用新的 Tab 组件
+        if not hasattr(self, 'peak_detection_tab'):
+            self.peak_detection_tab = PeakDetectionTab(parent=self)
+            # 连接扫描按钮
+            if hasattr(self.peak_detection_tab, 'rename_scan_button'):
+                self.peak_detection_tab.rename_scan_button.clicked.connect(self.scan_and_load_legend_rename)
+            # 为了兼容性，将 Tab 中的控件也添加到主窗口（通过属性访问）
+            for attr_name, widget in self.peak_detection_tab.get_widgets_dict().items():
+                setattr(self, attr_name, widget)
+            # 确保 rename_layout 可以访问
+            if hasattr(self.peak_detection_tab, 'rename_layout'):
+                self.rename_layout = self.peak_detection_tab.rename_layout
+        return self.peak_detection_tab
     
     def _create_nmf_tab_content(self):
         """创建NMF分析标签页内容"""
         # NMF 页由 NMFPanelMixin 构建
-        return self.setup_nmf_tab()
+        # 确保 NMF Tab 被创建，这样控件才会被添加到主窗口
+        if not hasattr(self, 'nmf_tab') or self.nmf_tab is None:
+            self.nmf_tab = self.setup_nmf_tab()
+        return self.nmf_tab
+    
+    def _ensure_tabs_initialized(self):
+        """确保所有 Tab 已初始化，这样控件才能被访问"""
+        try:
+            # 创建所有 Tab（如果还没有创建）
+            if not hasattr(self, 'plotting_tab'):
+                self._create_plotting_tab_content()
+            if not hasattr(self, 'file_controls_tab'):
+                self._create_file_tab_content()
+            if not hasattr(self, 'peak_detection_tab'):
+                self._create_peak_tab_content()
+            if not hasattr(self, 'nmf_tab'):
+                self._create_nmf_tab_content()
+            if not hasattr(self, 'physics_tab'):
+                self._create_physics_tab_content()
+        except Exception as e:
+            import traceback
+            print(f"警告: 初始化 Tab 失败: {e}")
+            traceback.print_exc()
     
     def _create_physics_tab_content(self):
         """创建物理验证标签页内容"""
-        return self.setup_physics_tab()
+        # 使用新的 Tab 组件
+        if not hasattr(self, 'physics_tab'):
+            self.physics_tab = PhysicsTab(parent=self)
+            # 连接按钮
+            if hasattr(self.physics_tab, 'btn_run_fit'):
+                self.physics_tab.btn_run_fit.clicked.connect(self.run_scattering_fit_overlay)
+            if hasattr(self.physics_tab, 'btn_clear_fits'):
+                self.physics_tab.btn_clear_fits.clicked.connect(self.clear_all_fit_curves)
+            # 为了兼容性，将 Tab 中的控件也添加到主窗口（通过属性访问）
+            for attr_name, widget in self.physics_tab.get_widgets_dict().items():
+                setattr(self, attr_name, widget)
+        return self.physics_tab
     
     # --- Tab 1: 绘图设置 ---
-    def setup_plotting_tab(self):
-        tab1 = QWidget()
-        grid_layout = QGridLayout(tab1)
-        grid_layout.setSpacing(10)
-
-        # --- 1. 左侧：X轴截断 + 预处理 ---
-        left_vbox = QVBoxLayout()
-
-        # 1.1 X 轴截断（物理 + 多段）
-        x_trunc_group = CollapsibleGroupBox("1. X 轴截断", is_expanded=True)
-        x_trunc_layout = QFormLayout()
-
-        # 物理 Min / Max 截断（从主菜单迁移到这里）
-        self.x_min_phys_input = QLineEdit()
-        self.x_min_phys_input.setPlaceholderText("例如: 600")
-        self.x_max_phys_input = QLineEdit()
-        self.x_max_phys_input.setPlaceholderText("例如: 4000")
-        x_trunc_layout.addRow("物理截断 Min:", self.x_min_phys_input)
-        x_trunc_layout.addRow("物理截断 Max:", self.x_max_phys_input)
-
-        # 多段截断：如 600-800, 1000-1200
-        self.x_segments_input = QLineEdit()
-        self.x_segments_input.setPlaceholderText("多段截断: 例如 600-800, 1000-1200（留空则只用 Min/Max 或全范围）")
-        x_trunc_layout.addRow("多段截断 (可选):", self.x_segments_input)
-
-        x_trunc_group.setContentLayout(x_trunc_layout)
-        left_vbox.addWidget(x_trunc_group)
-        
-        # 1.2 数据预处理（文件及分组配置已移到主菜单）
-        preprocess_group = CollapsibleGroupBox("2. 数据预处理 (AsLS / QC / BE / SNV)", is_expanded=True)
-        prep_layout = QFormLayout()
-        
-        # 跳过行数已移至主菜单，这里不再显示
-        
-        self.qc_check = QCheckBox("启用 QC (剔除弱信号)")
-        
-        # 改为无限长度的数字输入，避免小数位/位数被限制
-        self.qc_threshold_spin = UnlimitedNumericInput(default_value="5.0")
-        
-        prep_layout.addRow(self._create_h_layout([self.qc_check, QLabel("阈值:"), self.qc_threshold_spin]))
-        
-        # --- Bose-Einstein 修正：整合到预处理 ---
-        self.be_check = QCheckBox("启用 Bose-Einstein 校正")
-        self.be_temp_spin = UnlimitedNumericInput(default_value="300.0")
-        prep_layout.addRow(self.be_check)
-        prep_layout.addRow("BE 温度 T (K):", self.be_temp_spin)
-        # ----------------------------------------
-        
-        self.baseline_als_check = QCheckBox("启用 AsLS 基线校正 (推荐)")
-        
-        self.lam_spin = UnlimitedNumericInput(default_value="10000")
-        
-        self.p_spin = UnlimitedNumericInput(default_value="0.005")
-        
-        prep_layout.addRow(self.baseline_als_check)
-        prep_layout.addRow("Lambda (平滑度):", self.lam_spin)
-        prep_layout.addRow("P (非对称度):", self.p_spin)
-
-        # 多点多项式基线校正（兼容旧版）
-        self.baseline_poly_check = QCheckBox("启用多项式基线 (备选)")
-        self.baseline_points_spin = QSpinBox()
-        self.baseline_points_spin.setRange(1, 1000000)
-        self.baseline_points_spin.setValue(50)
-        self.baseline_poly_spin = QSpinBox()
-        self.baseline_poly_spin.setRange(1, 10)
-        self.baseline_poly_spin.setValue(3)
-        prep_layout.addRow(self.baseline_poly_check)
-        prep_layout.addRow("采样点 / 多项式阶数:", self._create_h_layout([
-            self.baseline_points_spin, QLabel("阶数:"), self.baseline_poly_spin
-        ]))
-        
-        self.smoothing_check = QCheckBox("启用 SG 平滑")
-        
-        self.smoothing_window_spin = QSpinBox()
-        self.smoothing_window_spin.setRange(-999999999, 999999999)
-        self.smoothing_window_spin.setValue(15)
-        
-        self.smoothing_poly_spin = QSpinBox()
-        self.smoothing_poly_spin.setRange(-999999999, 999999999)
-        self.smoothing_poly_spin.setValue(3)
-        
-        prep_layout.addRow(self.smoothing_check)
-        prep_layout.addRow("窗口 / 阶数:", self._create_h_layout([self.smoothing_window_spin, QLabel("阶数:"), self.smoothing_poly_spin]))
-        
-        self.normalization_combo = QComboBox()
-        self.normalization_combo.addItems(['None', 'snv', 'max', 'area'])
-        prep_layout.addRow("归一化模式:", self.normalization_combo)
-        
-        # 注意：SVD 去噪已移至NMF分析配置中，不再在全局预处理中使用
-        
-        # 全局动态范围压缩预处理
-        self.global_transform_combo = QComboBox()
-        self.global_transform_combo.addItems(['无', '对数变换 (Log)', '平方根变换 (Sqrt)'])
-        self.global_transform_combo.setCurrentText('无')
-        
-        self.global_log_base_combo = QComboBox()
-        self.global_log_base_combo.addItems(['10', 'e'])
-        self.global_log_base_combo.setCurrentText('10')
-        
-        self.global_log_offset_spin = UnlimitedNumericInput(default_value="1.0")
-        
-        self.global_sqrt_offset_spin = UnlimitedNumericInput(default_value="0.0")
-        
-        transform_layout = QVBoxLayout()
-        transform_layout.addWidget(QLabel("全局动态范围压缩:"))
-        transform_layout.addWidget(self.global_transform_combo)
-        
-        log_params_layout = QHBoxLayout()
-        log_params_layout.addWidget(QLabel("对数底数:"))
-        log_params_layout.addWidget(self.global_log_base_combo)
-        log_params_layout.addWidget(QLabel("偏移:"))
-        log_params_layout.addWidget(self.global_log_offset_spin)
-        log_params_widget = QWidget()
-        log_params_widget.setLayout(log_params_layout)
-        
-        sqrt_params_layout = QHBoxLayout()
-        sqrt_params_layout.addWidget(QLabel("平方根偏移:"))
-        sqrt_params_layout.addWidget(self.global_sqrt_offset_spin)
-        sqrt_params_widget = QWidget()
-        sqrt_params_widget.setLayout(sqrt_params_layout)
-        
-        transform_layout.addWidget(log_params_widget)
-        transform_layout.addWidget(sqrt_params_widget)
-        
-        transform_group = QGroupBox()
-        transform_group.setLayout(transform_layout)
-        prep_layout.addRow(transform_group)
-        
-        # 注意：二次函数拟合已删除（用户只需要二次导数，已在预处理流程中应用）
-        
-        preprocess_group.setContentLayout(prep_layout)
-        left_vbox.addWidget(preprocess_group)
-        
-        grid_layout.addLayout(left_vbox, 0, 0, 1, 1) # 左侧布局
-
-        # --- 2. 右侧：绘图样式 (出版质量控制) ---
-        right_vbox = QVBoxLayout()
-        
-        # 2.0 自动更新开关
-        auto_update_group = CollapsibleGroupBox("⚙️ 自动更新设置", is_expanded=False)
-        auto_update_layout = QFormLayout()
-        
-        self.auto_update_check = QCheckBox("启用自动更新（参数改变时自动重新绘制当前谱图）")
-        self.auto_update_check.setChecked(True)  # 默认启用
-        self.auto_update_check.setToolTip("启用后，调整参数时当前谱图会自动重新绘制")
-        auto_update_layout.addRow(self.auto_update_check)
-        
-        auto_update_group.setContentLayout(auto_update_layout)
-        right_vbox.addWidget(auto_update_group)
-        
-        # 2.1 绘图模式与标签
-        plot_style_group = CollapsibleGroupBox("📈 4. 绘图模式与全局设置", is_expanded=True)
-        style_layout = QFormLayout()
-        
-        self.plot_mode_combo = QComboBox()
-        self.plot_mode_combo.addItems(['Normal Overlay', 'Mean + Shadow'])
-        style_layout.addRow("绘图模式:", self.plot_mode_combo)
-        
-        # 注意：X轴翻转、显示X/Y轴数值已移至"样式与匹配"窗口的出版质量样式面板
-        # 注意：二次导数已在预处理流程中应用，不再需要单独的控件
-        
-        # 整体Y轴偏移（预处理最后一步，在二次导数之后）
-        self.global_y_offset_spin = QDoubleSpinBox()
-        self.global_y_offset_spin.setRange(-999999999.0, 999999999.0)
-        self.global_y_offset_spin.setDecimals(15)
-        self.global_y_offset_spin.setValue(0.0)
-        self.global_y_offset_spin.setSingleStep(0.1)
-        self.global_y_offset_spin.setToolTip("整体Y轴偏移（预处理最后一步，在二次导数之后应用）")
-        style_layout.addRow("整体Y轴偏移（预处理）:", self.global_y_offset_spin)
-        
-        self.plot_style_combo = QComboBox()
-        self.plot_style_combo.addItems(['line', 'scatter'])
-        style_layout.addRow("绘制风格:", self.plot_style_combo)
-
-        
-        # FIX: 修正 QDoubleSpinBox 实例化错误
-        self.global_stack_offset_spin = QDoubleSpinBox()
-        self.global_stack_offset_spin.setRange(-999999999.0, 999999999.0)
-        self.global_stack_offset_spin.setDecimals(15)
-        self.global_stack_offset_spin.setValue(0.5)
-        
-        self.global_y_scale_factor_spin = QDoubleSpinBox()
-        self.global_y_scale_factor_spin.setRange(-999999999.0, 999999999.0)
-        self.global_y_scale_factor_spin.setDecimals(15)
-        self.global_y_scale_factor_spin.setValue(1.0)
-        self.global_y_scale_factor_spin.setSingleStep(0.1)
-        
-        # 注意：堆叠偏移已移至"样式与匹配"窗口的谱线扫描面板
-        style_layout.addRow("Y缩放:", self.global_y_scale_factor_spin)
-        
-        # 注意：X/Y轴标题、主标题控制、出版质量样式、峰值匹配、谱线扫描已移至"样式与匹配"窗口
-        # 注意：浓度梯度图相关设置已移至样式配置，统一管理
-
-        plot_style_group.setContentLayout(style_layout)
-        right_vbox.addWidget(plot_style_group)
-        
-        # 注意：出版质量样式控制、峰值匹配、谱线扫描已移至"样式与匹配"窗口
-        # 请点击主菜单的"样式与匹配"按钮进行配置
-        
-        right_vbox.addStretch(1) # 撑开
-        grid_layout.addLayout(right_vbox, 0, 1, 1, 1) # 右侧布局
-        return tab1
-    
-    # --- Tab 2: 文件扫描与独立Y轴 ---
-    def setup_file_controls_tab(self):
-        tab2 = QWidget()
-        layout = QVBoxLayout(tab2)
-        layout.setSpacing(10)
-        
-        # 注意：谱线扫描与堆叠偏移面板已移至"样式与匹配"窗口
-        # 请点击主菜单的"样式与匹配"按钮进行配置
-        
-        # 1. 文件扫描与独立Y轴控制（保留原有功能）
-        file_controls_group = CollapsibleGroupBox("文件扫描与独立Y轴控制", is_expanded=True)
-        file_controls_layout = QVBoxLayout()
-        
-        self.scan_button = QPushButton("扫描文件并加载调整项")
-        self.scan_button.setStyleSheet("font-size: 12pt; padding: 8px; background-color: #4CAF50; color: white; font-weight: bold;")
-        self.scan_button.clicked.connect(self.scan_and_load_file_controls)
-        file_controls_layout.addWidget(self.scan_button)
-        
-        self.dynamic_controls_layout = QVBoxLayout()
-        self.dynamic_controls_widget = QWidget()
-        self.dynamic_controls_widget.setLayout(self.dynamic_controls_layout)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self.dynamic_controls_widget)
-        scroll.setFixedHeight(400)
-        file_controls_layout.addWidget(scroll)
-        
-        file_controls_group.setContentLayout(file_controls_layout)
-        layout.addWidget(file_controls_group)
-        
-        # 2. NMF组分独立Y轴控制和重命名
-        nmf_controls_group = CollapsibleGroupBox("NMF组分独立Y轴控制和图例重命名", is_expanded=True)
-        nmf_controls_layout = QVBoxLayout()
-        
-        nmf_info_label = QLabel("提示：运行NMF分析后，会自动为每个组分创建独立Y轴控制和图例重命名选项。")
-        nmf_info_label.setWordWrap(True)
-        nmf_controls_layout.addWidget(nmf_info_label)
-        
-        self.nmf_component_controls_layout = QVBoxLayout()
-        self.nmf_component_controls_widget = QWidget()
-        self.nmf_component_controls_widget.setLayout(self.nmf_component_controls_layout)
-        nmf_scroll = QScrollArea()
-        nmf_scroll.setWidgetResizable(True)
-        nmf_scroll.setWidget(self.nmf_component_controls_widget)
-        nmf_scroll.setFixedHeight(300)
-        nmf_controls_layout.addWidget(nmf_scroll)
-        
-        nmf_controls_group.setContentLayout(nmf_controls_layout)
-        layout.addWidget(nmf_controls_group)
-        
-        # 3. 组瀑布图独立堆叠位移控制
-        waterfall_controls_group = CollapsibleGroupBox("组瀑布图独立堆叠位移控制", is_expanded=True)
-        waterfall_controls_layout = QVBoxLayout()
-        
-        waterfall_info_label = QLabel("提示：扫描组后，可以为每组设置独立的堆叠位移值。")
-        waterfall_info_label.setWordWrap(True)
-        waterfall_controls_layout.addWidget(waterfall_info_label)
-        
-        # 扫描组按钮
-        scan_groups_button = QPushButton("扫描组并加载位移控制")
-        scan_groups_button.setStyleSheet("font-size: 11pt; padding: 6px; background-color: #2196F3; color: white; font-weight: bold;")
-        scan_groups_button.clicked.connect(self.scan_and_load_group_waterfall_controls)
-        waterfall_controls_layout.addWidget(scan_groups_button)
-        
-        # 导出平均值谱线按钮
-        export_avg_button = QPushButton("导出平均值谱线")
-        export_avg_button.setStyleSheet("font-size: 11pt; padding: 6px; background-color: #FF9800; color: white; font-weight: bold;")
-        export_avg_button.clicked.connect(self.export_group_averages)
-        waterfall_controls_layout.addWidget(export_avg_button)
-        
-        self.group_waterfall_controls_layout = QVBoxLayout()
-        self.group_waterfall_controls_widget = QWidget()
-        self.group_waterfall_controls_widget.setLayout(self.group_waterfall_controls_layout)
-        waterfall_scroll = QScrollArea()
-        waterfall_scroll.setWidgetResizable(True)
-        waterfall_scroll.setWidget(self.group_waterfall_controls_widget)
-        waterfall_scroll.setFixedHeight(300)
-        waterfall_controls_layout.addWidget(waterfall_scroll)
-        
-        waterfall_controls_group.setContentLayout(waterfall_controls_layout)
-        layout.addWidget(waterfall_controls_group)
-        
-        # 4. 合成数据与标准库配置
-        aug_lib_group = CollapsibleGroupBox("合成数据与标准库配置", is_expanded=True)
-        aug_lib_layout = QFormLayout()
-        
-        # 数据增强部分
-        aug_header = QLabel("数据增强 (Data Augmentation)")
-        aug_header.setStyleSheet("font-weight: bold; font-size: 11pt;")
-        aug_lib_layout.addRow(aug_header)
-        
-        # 纯组分文件夹
-        aug_folder_layout = QHBoxLayout()
-        self.aug_folder_input = QLineEdit()
-        self.aug_folder_input.setPlaceholderText("选择包含纯组分光谱的文件夹")
-        self.aug_browse_button = QPushButton("浏览...")
-        self.aug_browse_button.clicked.connect(self._browse_aug_folder)
-        aug_folder_layout.addWidget(self.aug_folder_input)
-        aug_folder_layout.addWidget(self.aug_browse_button)
-        aug_lib_layout.addRow("纯组分文件夹:", aug_folder_layout)
-        
-        # 噪音和基线漂移参数
-        self.aug_noise_spin = QDoubleSpinBox()
-        self.aug_noise_spin.setRange(-999999999.0, 999999999.0)
-        self.aug_noise_spin.setDecimals(15)
-        self.aug_noise_spin.setValue(0.01)
-        self.aug_noise_spin.setToolTip("高斯噪声水平（相对于最大强度）")
-        
-        self.aug_drift_spin = QDoubleSpinBox()
-        self.aug_drift_spin.setRange(-999999999.0, 999999999.0)
-        self.aug_drift_spin.setDecimals(15)
-        self.aug_drift_spin.setValue(0.0)
-        self.aug_drift_spin.setToolTip("基线漂移幅度")
-        
-        # 复杂度参数（控制高级增强强度）
-        self.aug_complexity_spin = QDoubleSpinBox()
-        self.aug_complexity_spin.setRange(-999999999.0, 999999999.0)
-        self.aug_complexity_spin.setDecimals(15)
-        self.aug_complexity_spin.setValue(0.5)
-        self.aug_complexity_spin.setToolTip("复杂度因子（0-1）：控制偏移/拉伸/抑制等高级增强的强度")
-        
-        # 高级增强开关
-        self.aug_advanced_check = QCheckBox("启用高级增强 (偏移/拉伸/峰抑制)")
-        self.aug_advanced_check.setChecked(True)
-        self.aug_advanced_check.setToolTip("启用后，将应用光谱偏移、拉伸和选择性峰抑制等高级增强技术")
-        
-        aug_lib_layout.addRow("噪声水平:", self.aug_noise_spin)
-        aug_lib_layout.addRow("基线漂移:", self.aug_drift_spin)
-        aug_lib_layout.addRow("复杂度因子:", self.aug_complexity_spin)
-        aug_lib_layout.addRow(self.aug_advanced_check)
-        
-        # 生成合成数据按钮
-        self.generate_synthetic_button = QPushButton("生成合成数据 (1000条)")
-        self.generate_synthetic_button.setStyleSheet("font-size: 11pt; padding: 6px; background-color: #9C27B0; color: white; font-weight: bold;")
-        self.generate_synthetic_button.clicked.connect(self._run_data_augmentation)
-        aug_lib_layout.addRow(self.generate_synthetic_button)
-        
-        # 标准库匹配部分
-        lib_header = QLabel("标准库匹配 (Library Matching)")
-        lib_header.setStyleSheet("font-weight: bold; font-size: 11pt; margin-top: 10px;")
-        aug_lib_layout.addRow(lib_header)
-        
-        # 标准库文件夹
-        lib_folder_layout = QHBoxLayout()
-        self.library_folder_input = QLineEdit()
-        self.library_folder_input.setPlaceholderText("选择标准库文件夹（RRUFF或有机物标准库）")
-        self.library_browse_button = QPushButton("浏览...")
-        self.library_browse_button.clicked.connect(self._browse_library_folder)
-        lib_folder_layout.addWidget(self.library_folder_input)
-        lib_folder_layout.addWidget(self.library_browse_button)
-        aug_lib_layout.addRow("标准库文件夹:", lib_folder_layout)
-        
-        # 加载标准库按钮
-        self.load_library_button = QPushButton("加载标准库")
-        self.load_library_button.setStyleSheet("font-size: 11pt; padding: 6px; background-color: #2196F3; color: white; font-weight: bold;")
-        self.load_library_button.clicked.connect(self._load_library_matcher)
-        aug_lib_layout.addRow(self.load_library_button)
-        
-        # 标准库状态标签
-        self.library_status_label = QLabel("状态: 未加载")
-        self.library_status_label.setStyleSheet("color: gray; font-size: 9pt;")
-        aug_lib_layout.addRow("", self.library_status_label)
-        
-        # RRUFF匹配部分
-        rruff_header = QLabel("RRUFF数据库匹配")
-        rruff_header.setStyleSheet("font-weight: bold; font-size: 11pt; margin-top: 10px;")
-        aug_lib_layout.addRow(rruff_header)
-        
-        # RRUFF匹配容差参数
-        self.rruff_match_tolerance_spin = SmartDoubleSpinBox()
-        self.rruff_match_tolerance_spin.setRange(0.1, 100.0)
-        self.rruff_match_tolerance_spin.setDecimals(1)
-        self.rruff_match_tolerance_spin.setValue(5.0)
-        self.rruff_match_tolerance_spin.setToolTip("峰值匹配容差（cm⁻¹）：两个峰值位置的距离小于此值时认为匹配。值越大匹配的峰值越多。对于自身匹配，建议设置为较大值（如10-20）以确保100%匹配。默认5.0 cm⁻¹")
-        self.rruff_match_tolerance_spin.valueChanged.connect(self._on_rruff_tolerance_changed)
-        aug_lib_layout.addRow("匹配容差 (cm⁻¹):", self.rruff_match_tolerance_spin)
-        
-        # RRUFF匹配按钮
-        self.btn_rruff_match = QPushButton("🔍 匹配RRUFF光谱")
-        self.btn_rruff_match.setStyleSheet("font-size: 11pt; padding: 6px; background-color: #FF5722; color: white; font-weight: bold;")
-        self.btn_rruff_match.clicked.connect(self._match_rruff_spectra)
-        self.btn_rruff_match.setEnabled(False)
-        aug_lib_layout.addRow("", self.btn_rruff_match)
-        
-        # RRUFF匹配结果列表
-        self.rruff_match_list = QListWidget()
-        self.rruff_match_list.setMaximumHeight(200)
-        self.rruff_match_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)  # 支持Ctrl+点击多选
-        self.rruff_match_list.itemDoubleClicked.connect(self._on_rruff_item_double_clicked)
-        self.rruff_match_list.itemClicked.connect(self._on_rruff_item_clicked)  # 使用itemClicked检测Ctrl键
-        self.rruff_match_list.itemSelectionChanged.connect(self._on_rruff_selection_changed)
-        aug_lib_layout.addRow("匹配结果 (双击添加，Ctrl+点击叠加):", self.rruff_match_list)
-        
-        # 清除选中按钮
-        self.btn_clear_rruff = QPushButton("清除已选RRUFF光谱")
-        self.btn_clear_rruff.setStyleSheet("font-size: 10pt; padding: 4px; background-color: #9E9E9E; color: white;")
-        self.btn_clear_rruff.clicked.connect(self._clear_selected_rruff)
-        self.btn_clear_rruff.setEnabled(False)
-        aug_lib_layout.addRow("", self.btn_clear_rruff)
-        
-        aug_lib_group.setContentLayout(aug_lib_layout)
-        layout.addWidget(aug_lib_group)
-        
-        layout.addStretch(1)
-        return tab2
+    # 注意：此方法已废弃并删除，现在使用 PlottingSettingsTab 类
+    # 实际已由 _create_plotting_tab_content() 使用新组件
     
     def _browse_aug_folder(self):
         """浏览纯组分文件夹"""
@@ -2347,677 +2293,13 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         except Exception as e:
             QMessageBox.critical(self, "错误", f"数据增强失败：{str(e)}")
             traceback.print_exc()
-    
-    # --- Tab 3: 波峰检测 ---
-    def setup_peak_detection_tab(self):
-        tab3 = QWidget()
-        layout = QVBoxLayout(tab3)
-        layout.setSpacing(10)
-        
-        # 波峰检测配置
-        advanced_group = CollapsibleGroupBox("波峰检测与垂直参考线", is_expanded=True)
-        adv_layout = QFormLayout()
-        
-        # 波峰检测开关
-        self.peak_check = QCheckBox("启用自动波峰检测")
-        adv_layout.addRow(self.peak_check)
-        
-        # 波峰检测参数组
-        peak_params_group = QGroupBox("波峰检测参数")
-        peak_params_layout = QFormLayout(peak_params_group)
-        
-        # 基础参数（使用合理的默认值，代码会自动根据数据范围调整）
-        # height: 峰高阈值，0表示自动（使用数据最大值的2%）
-        # 注意：SpecialValueText只在值为最小值时显示，所以将最小值设为0
-        self.peak_height_spin = QDoubleSpinBox()
-        self.peak_height_spin.setRange(-999999999.0, 999999999.0)  # 允许负数，0值会显示SpecialValueText
-        self.peak_height_spin.setDecimals(15)
-        self.peak_height_spin.setValue(0.0)  # 0表示自动（代码会使用数据最大值的0.01%）
-        self.peak_height_spin.setSpecialValueText("自动 (0.01% of max)")
-        self.peak_height_spin.setToolTip("峰高阈值：0=自动(0.01%)，可设置为极小值(如-999999)或负数以检测所有峰值，包括负峰")
-        self.peak_height_spin.setSingleStep(0.1)
-        
-        # distance: 峰值之间的最小距离（数据点数量），0表示自动（使用数据点数的0.1%）
-        self.peak_distance_spin = QSpinBox()
-        self.peak_distance_spin.setRange(0, 999999999)  # 最小值设为0
-        self.peak_distance_spin.setValue(0)  # 0表示自动，代码会自动计算
-        self.peak_distance_spin.setSpecialValueText("自动 (0.1% of points)")
-        self.peak_distance_spin.setToolTip("最小间距：0=自动(0.1%)，设置为1可检测所有相邻峰值，设置为更大值可过滤假峰")
-        
-        # prominence: 峰值突出度，0表示不使用此参数（推荐保持为0，除非需要更精确的峰值筛选）
-        self.peak_prominence_spin = QDoubleSpinBox()
-        self.peak_prominence_spin.setRange(0.0, 999999999.0)  # 最小值设为0
-        self.peak_prominence_spin.setDecimals(15)
-        self.peak_prominence_spin.setValue(0.0)  # 0表示不使用此参数（推荐保持为0）
-        self.peak_prominence_spin.setSpecialValueText("禁用 (推荐)")
-        
-        # width: 峰值的最小宽度（数据点数量），通常不需要设置
-        self.peak_width_spin = QDoubleSpinBox()
-        self.peak_width_spin.setRange(0.0, 999999999.0)  # 最小值设为0
-        self.peak_width_spin.setDecimals(15)
-        self.peak_width_spin.setValue(0.0)  # 0表示不使用此参数（推荐保持为0）
-        self.peak_width_spin.setSpecialValueText("禁用 (推荐)")
-        
-        # wlen: 用于计算prominence的窗口长度，通常不需要设置
-        self.peak_wlen_spin = QSpinBox()
-        self.peak_wlen_spin.setRange(0, 999999999)  # 最小值设为0
-        self.peak_wlen_spin.setValue(0)  # 0表示不使用此参数（推荐保持为0）
-        self.peak_wlen_spin.setSpecialValueText("禁用 (推荐)")
-        
-        # rel_height: 用于width计算的相对高度，通常不需要设置
-        self.peak_rel_height_spin = QDoubleSpinBox()
-        self.peak_rel_height_spin.setRange(0.0, 999999999.0)  # 最小值设为0
-        self.peak_rel_height_spin.setDecimals(15)
-        self.peak_rel_height_spin.setValue(0.0)  # 0表示不使用此参数（推荐保持为0）
-        self.peak_rel_height_spin.setSpecialValueText("禁用 (推荐)")
-        
-        peak_params_layout.addRow("峰高阈值 (height):", self.peak_height_spin)
-        peak_params_layout.addRow("最小间距 (distance):", self.peak_distance_spin)
-        peak_params_layout.addRow("突出度 (prominence):", self.peak_prominence_spin)
-        peak_params_layout.addRow("最小宽度 (width):", self.peak_width_spin)
-        peak_params_layout.addRow("窗口长度 (wlen):", self.peak_wlen_spin)
-        peak_params_layout.addRow("相对高度 (rel_height):", self.peak_rel_height_spin)
-        
-        # 添加详细说明标签
-        info_text = """参数调整指南：
-        
-【基础参数 - 建议调整】
-• height (峰高阈值): 保持"自动"即可，代码会自动使用数据最大值的0.01%
-  - 如果检测到太多小峰：可以设置一个较大的值（如数据最大值的1-5%）
-  - 如果检测不到峰值：保持"自动"或设置为极小值（如0.0001）以检测所有峰值
-  - 要检测所有峰值：设置为极小值（如0.0001）或负数（检测负峰）
-  
-• distance (最小间距): 保持"自动"即可，代码会自动使用数据点数的0.1%
-  - 如果两个峰太近被合并：设置为1以检测所有相邻峰值
-  - 如果检测到太多假峰：可以设置一个较大的值（如10-20个数据点）
-  - 要检测所有峰值：设置为1（最小间距）
-
-【高级参数 - 通常不需要调整】
-• prominence (突出度): 保持"禁用"，除非需要更精确的峰值筛选
-• width (最小宽度): 保持"禁用"，除非需要过滤窄峰
-• wlen (窗口长度): 保持"禁用"，除非使用prominence参数
-• rel_height (相对高度): 保持"禁用"，除非使用width参数
-
-【调整建议】
-1. 首先保持所有参数为默认值（自动/禁用）
-2. 如果检测不到峰值：检查数据是否经过预处理（平滑、基线校正等）
-3. 如果检测到太多假峰：适当增加height或distance的值
-4. 如果两个峰太近：减小distance的值"""
-        
-        info_label = QLabel(info_text)
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #333; font-size: 9pt; padding: 5px; background-color: #f0f0f0; border: 1px solid #ccc;")
-        peak_params_layout.addRow("", info_label)
-        
-        adv_layout.addRow(peak_params_group)
-        
-        # 标记样式设置
-        peak_marker_group = QGroupBox("峰值标记样式")
-        peak_marker_layout = QFormLayout(peak_marker_group)
-        
-        self.peak_marker_shape_combo = QComboBox()
-        self.peak_marker_shape_combo.addItems(['x', 'o', 's', 'D', '^', 'v', '*', '+', '.'])
-        self.peak_marker_shape_combo.setCurrentText('x')
-        
-        self.peak_marker_size_spin = QSpinBox()
-        self.peak_marker_size_spin.setRange(-999999999, 999999999)
-        self.peak_marker_size_spin.setValue(10)
-        
-        self.peak_marker_color_input = QLineEdit("")
-        self.peak_marker_color_input.setPlaceholderText("留空=使用线条颜色，例如: red, #FF0000")
-        
-        peak_marker_layout.addRow("标记形状:", self.peak_marker_shape_combo)
-        peak_marker_layout.addRow("标记大小:", self.peak_marker_size_spin)
-        peak_marker_layout.addRow("标记颜色:", self._create_h_layout([self.peak_marker_color_input, self._create_color_picker_button(self.peak_marker_color_input)]))
-        
-        adv_layout.addRow(peak_marker_group)
-        
-        # 波数显示设置
-        peak_label_group = QGroupBox("波数标签显示")
-        peak_label_layout = QFormLayout(peak_label_group)
-        
-        self.peak_show_label_check = QCheckBox("显示波数值", checked=True)
-        
-        self.peak_label_font_combo = QComboBox()
-        self.peak_label_font_combo.addItems(['Times New Roman', 'Arial', 'SimHei', 'Courier New'])
-        
-        self.peak_label_size_spin = QSpinBox()
-        self.peak_label_size_spin.setRange(-999999999, 999999999)
-        self.peak_label_size_spin.setValue(10)
-        
-        self.peak_label_color_input = QLineEdit("black")
-        self.peak_label_color_input.setPlaceholderText("例如: red, #FF0000")
-        
-        self.peak_label_bold_check = QCheckBox("字体加粗")
-        
-        self.peak_label_rotation_spin = QDoubleSpinBox()
-        self.peak_label_rotation_spin.setRange(-999999999.0, 999999999.0)
-        self.peak_label_rotation_spin.setDecimals(15)
-        self.peak_label_rotation_spin.setValue(0.0)
-        self.peak_label_rotation_spin.setSuffix("°")
-        
-        peak_label_layout.addRow(self.peak_show_label_check)
-        peak_label_layout.addRow("字体:", self.peak_label_font_combo)
-        peak_label_layout.addRow("字体大小:", self.peak_label_size_spin)
-        peak_label_layout.addRow("颜色:", self._create_h_layout([self.peak_label_color_input, self._create_color_picker_button(self.peak_label_color_input)]))
-        peak_label_layout.addRow(self.peak_label_bold_check)
-        peak_label_layout.addRow("旋转角度:", self.peak_label_rotation_spin)
-        
-        adv_layout.addRow(peak_label_group)
-        
-        # 垂直参考线设置
-        vertical_lines_group = QGroupBox("垂直参考线")
-        vertical_lines_layout = QFormLayout(vertical_lines_group)
-        
-        self.vertical_lines_input = QTextEdit()
-        self.vertical_lines_input.setFixedHeight(40)
-        self.vertical_lines_input.setPlaceholderText("垂直参考线 (逗号分隔)")
-        
-        self.vertical_line_color_input = QLineEdit("gray")
-        self.vertical_line_color_input.setPlaceholderText("例如: red, #FF0000")
-        
-        self.vertical_line_width_spin = QDoubleSpinBox()
-        self.vertical_line_width_spin.setRange(-999999999.0, 999999999.0)
-        self.vertical_line_width_spin.setDecimals(15)
-        self.vertical_line_width_spin.setValue(0.8)
-        
-        self.vertical_line_style_combo = QComboBox()
-        self.vertical_line_style_combo.addItems(['-', '--', '-.', ':', ''])
-        self.vertical_line_style_combo.setCurrentText(':')
-        
-        self.vertical_line_alpha_spin = QDoubleSpinBox()
-        self.vertical_line_alpha_spin.setRange(-999999999.0, 999999999.0)
-        self.vertical_line_alpha_spin.setDecimals(15)
-        self.vertical_line_alpha_spin.setValue(0.7)
-        
-        vertical_lines_layout.addRow("波数位置:", self.vertical_lines_input)
-        vertical_lines_layout.addRow("颜色:", self._create_h_layout([self.vertical_line_color_input, self._create_color_picker_button(self.vertical_line_color_input)]))
-        vertical_lines_layout.addRow("线宽:", self.vertical_line_width_spin)
-        vertical_lines_layout.addRow("线型:", self.vertical_line_style_combo)
-        vertical_lines_layout.addRow("透明度:", self.vertical_line_alpha_spin)
-        
-        adv_layout.addRow(vertical_lines_group)
-        
-        # 匹配线样式设置（单独设置，放在通用样式栏中间）
-        match_lines_group = QGroupBox("匹配线样式")
-        match_lines_layout = QFormLayout(match_lines_group)
-        
-        self.match_line_color_input = QLineEdit("red")
-        self.match_line_color_input.setPlaceholderText("例如: red, #FF0000")
-        
-        self.match_line_width_spin = QDoubleSpinBox()
-        self.match_line_width_spin.setRange(-999999999.0, 999999999.0)
-        self.match_line_width_spin.setDecimals(15)
-        self.match_line_width_spin.setValue(1.0)
-        
-        self.match_line_style_combo = QComboBox()
-        self.match_line_style_combo.addItems(['-', '--', '-.', ':', ''])
-        self.match_line_style_combo.setCurrentText('-')
-        
-        self.match_line_alpha_spin = QDoubleSpinBox()
-        self.match_line_alpha_spin.setRange(-999999999.0, 999999999.0)
-        self.match_line_alpha_spin.setDecimals(15)
-        self.match_line_alpha_spin.setValue(0.8)
-        
-        match_lines_layout.addRow("颜色:", self._create_h_layout([self.match_line_color_input, self._create_color_picker_button(self.match_line_color_input)]))
-        match_lines_layout.addRow("线宽:", self.match_line_width_spin)
-        match_lines_layout.addRow("线型:", self.match_line_style_combo)
-        match_lines_layout.addRow("透明度:", self.match_line_alpha_spin)
-        
-        adv_layout.addRow(match_lines_group)
-        
-        # RRUFF参考线设置
-        rruff_ref_lines_group = QGroupBox("RRUFF匹配参考线")
-        rruff_ref_lines_layout = QFormLayout(rruff_ref_lines_group)
-        
-        self.rruff_ref_lines_enabled_check = QCheckBox("启用RRUFF匹配参考线", checked=True)
-        rruff_ref_lines_layout.addRow(self.rruff_ref_lines_enabled_check)
-        
-        adv_layout.addRow(rruff_ref_lines_group)
-        
-        # 图例重命名
-        rename_group = QGroupBox("图例重命名")
-        rename_group_layout = QVBoxLayout()
-        self.rename_scan_button = QPushButton("扫描文件并加载重命名选项")
-        self.rename_scan_button.clicked.connect(self.scan_and_load_legend_rename)
-        rename_group_layout.addWidget(self.rename_scan_button)
-        
-        self.rename_area = QScrollArea(widgetResizable=True)
-        self.rename_area.setFixedHeight(150)
-        self.rename_container = QWidget()
-        self.rename_layout = QVBoxLayout(self.rename_container)
-        self.rename_area.setWidget(self.rename_container)
-        rename_group_layout.addWidget(self.rename_area)
-        
-        rename_group.setLayout(rename_group_layout)
-        adv_layout.addRow(rename_group)
-        
-        advanced_group.setContentLayout(adv_layout)
-        layout.addWidget(advanced_group)
-        
-        layout.addStretch(1)
-        # 独立窗口模式下，不再添加到 tab_widget，直接返回内容 widget
-        return tab3
 
     # --- Tab 2: NMF 分析 ---
-    # 新实现：委托给 nmf_panel.NMFPanelMixin，保留旧实现为 _setup_nmf_tab_internal_legacy
+    # 新实现：委托给 nmf_panel.NMFPanelMixin
     def _setup_nmf_tab_internal(self):
         tab2 = NMFPanelMixin._setup_nmf_tab_internal(self)
         # 独立窗口模式下，直接返回 NMF 配置页
         return tab2
-
-    def _setup_nmf_tab_internal_legacy(self):
-        tab2 = QWidget()
-        layout = QVBoxLayout(tab2)
-        
-        # --- A. NMF 参数设置 ---
-        nmf_group = QGroupBox("非负矩阵分解 (NMF) 设置")
-        nmf_layout = QFormLayout(nmf_group)
-        
-        # FIX: 修正 QSpinBox 实例化错误
-        self.nmf_comp_spin = QSpinBox()
-        self.nmf_comp_spin.setRange(-999999999, 999999999)
-        self.nmf_comp_spin.setValue(2)
-        
-        self.nmf_max_iter = QSpinBox()
-        self.nmf_max_iter.setRange(-999999999, 999999999)
-        self.nmf_max_iter.setValue(200)
-        
-        nmf_layout.addRow("组件数量 (k):", self.nmf_comp_spin)
-        nmf_layout.addRow("最大迭代次数:", self.nmf_max_iter)
-        
-        # --- 在 NMF Group 中新增预滤波控制 ---
-        # 预滤波开关
-        self.nmf_pca_filter_check = QCheckBox("启用预滤波/降维 (Pre-filtering)")
-        self.nmf_pca_filter_check.setChecked(True)  # 默认启用
-        
-        # 降维算法选择（Modified NMF Algorithm Selection）
-        self.nmf_filter_algo_combo = QComboBox()
-        algo_options = ['PCA (主成分分析)', 'NMF (非负矩阵分解)']
-        # 如果PyTorch可用，只显示Deep Autoencoder；否则显示sklearn版本
-        if TORCH_AVAILABLE:
-            algo_options.append('Deep Autoencoder (PyTorch)')
-        else:
-            algo_options.append('Autoencoder (AE - sklearn)')
-        self.nmf_filter_algo_combo.addItems(algo_options)
-        self.nmf_filter_algo_combo.setCurrentText('NMF (非负矩阵分解)')
-        
-        # 预滤波成分数（通用，适用于PCA和NMF）
-        self.nmf_pca_comp_spin = QSpinBox()
-        self.nmf_pca_comp_spin.setRange(-999999999, 999999999)
-        self.nmf_pca_comp_spin.setValue(6)  # 默认值 6 (根据成功经验)
-        
-        # 随机种子（用于Deep Autoencoder，可通过滚轮切换）
-        self.nmf_random_seed_spin = QSpinBox()
-        self.nmf_random_seed_spin.setRange(-999999999, 999999999)
-        self.nmf_random_seed_spin.setValue(42)  # 默认种子
-        self.nmf_random_seed_spin.setToolTip("随机种子（用于Deep Autoencoder）\n"
-                                            "使用鼠标滚轮切换种子，自动更新NMF结果\n"
-                                            "不同种子会产生不同的训练结果，可手动筛选最优解")
-        
-        # 连接滚轮事件和值改变事件，自动重新运行NMF
-        self.nmf_random_seed_spin.valueChanged.connect(self._on_seed_changed)
-        
-        # 将控件添加到 nmf_layout
-        nmf_layout.addRow(self.nmf_pca_filter_check)
-        nmf_layout.addRow(QLabel("预滤波/降维算法:"), self.nmf_filter_algo_combo)
-        nmf_layout.addRow("预滤波成分数 (N_Filter):", self.nmf_pca_comp_spin)
-        nmf_layout.addRow("随机种子 (Random Seed):", self.nmf_random_seed_spin)
-        
-        # 新增：区域权重输入（用于特征加权 NMF）
-        self.nmf_region_weights_input = QLineEdit()
-        self.nmf_region_weights_input.setPlaceholderText("例如: 800-1000:0.1, 1000-1200:1.0, 1200-1800:0.5")
-        self.nmf_region_weights_input.setToolTip("区域权重格式：波数范围1:权重1, 波数范围2:权重2, ...\n"
-                                                 "例如：800-1000:0.1 表示800-1000 cm⁻¹区域的权重为0.1\n"
-                                                 "留空则所有区域权重为1.0（无加权）")
-        nmf_layout.addRow("区域权重 (Region Weights):", self.nmf_region_weights_input)
-        
-        layout.addWidget(nmf_group)
-        
-        # --- A1. NMF 运行模式选择 ---
-        mode_group = QGroupBox("NMF 运行模式")
-        mode_layout = QVBoxLayout(mode_group)
-        
-        self.nmf_mode_button_group = QButtonGroup()
-        self.nmf_mode_standard = QRadioButton("A. 标准 NMF (学习 H 和 W)")
-        self.nmf_mode_regression = QRadioButton("B. 组分回归 (固定 H，仅计算 W)")
-        self.nmf_mode_standard.setChecked(True)  # 默认选择标准模式
-        
-        self.nmf_mode_button_group.addButton(self.nmf_mode_standard, 0)
-        self.nmf_mode_button_group.addButton(self.nmf_mode_regression, 1)
-        
-        mode_layout.addWidget(self.nmf_mode_standard)
-        mode_layout.addWidget(self.nmf_mode_regression)
-        
-        mode_info_label = QLabel("提示：标准模式会同时更新H和W矩阵；组分回归模式使用上一次标准NMF得到的H矩阵，仅计算新数据的W权重。")
-        mode_info_label.setWordWrap(True)
-        mode_layout.addWidget(mode_info_label)
-        
-        layout.addWidget(mode_group)
-        
-        # --- B. NMF 结果绘图样式 (新增) ---
-        style_group = CollapsibleGroupBox("NMF 结果绘图样式", is_expanded=True)
-        style_layout = QFormLayout()
-        
-        # 标题和轴标签设置
-        title_group = QGroupBox("标题和轴标签")
-        title_layout = QFormLayout(title_group)
-        
-        self.nmf_top_title_input = QLineEdit("Extracted Spectra (Components)")
-        self.nmf_bottom_title_input = QLineEdit("Concentration Weights (vs. Sample)")
-        
-        self.nmf_xlabel_top_input = QLineEdit("Wavenumber ($\\mathrm{cm^{-1}}$)")
-        self.nmf_ylabel_top_input = QLineEdit("Intensity (Arb. Unit)")
-        
-        self.nmf_xlabel_bottom_input = QLineEdit("Sample Name")
-        self.nmf_ylabel_bottom_input = QLineEdit("Weight (Arb. Unit)")
-        
-        title_layout.addRow("上图标题:", self.nmf_top_title_input)
-        title_layout.addRow("下图标题:", self.nmf_bottom_title_input)
-        title_layout.addRow("上图X轴标签:", self.nmf_xlabel_top_input)
-        
-        # NMF上图X轴标题控制：大小、间距、显示/隐藏
-        self.nmf_top_xlabel_font_spin = QSpinBox()
-        self.nmf_top_xlabel_font_spin.setRange(-999999999, 999999999)
-        self.nmf_top_xlabel_font_spin.setValue(16)  # 默认值
-        
-        self.nmf_top_xlabel_pad_spin = QDoubleSpinBox()
-        self.nmf_top_xlabel_pad_spin.setRange(-999999999.0, 999999999.0)
-        self.nmf_top_xlabel_pad_spin.setDecimals(15)
-        self.nmf_top_xlabel_pad_spin.setValue(10.0)  # 默认值
-        
-        self.nmf_top_xlabel_show_check = QCheckBox("显示上图X轴标题")
-        self.nmf_top_xlabel_show_check.setChecked(True)  # 默认显示
-        
-        title_layout.addRow("上图X轴标题控制:", self._create_h_layout([self.nmf_top_xlabel_show_check, QLabel("大小:"), self.nmf_top_xlabel_font_spin, QLabel("间距:"), self.nmf_top_xlabel_pad_spin]))
-        
-        title_layout.addRow("上图Y轴标签:", self.nmf_ylabel_top_input)
-        
-        # NMF上图Y轴标题控制：大小、间距、显示/隐藏
-        self.nmf_top_ylabel_font_spin = QSpinBox()
-        self.nmf_top_ylabel_font_spin.setRange(-999999999, 999999999)
-        self.nmf_top_ylabel_font_spin.setValue(16)  # 默认值
-        
-        self.nmf_top_ylabel_pad_spin = QDoubleSpinBox()
-        self.nmf_top_ylabel_pad_spin.setRange(-999999999.0, 999999999.0)
-        self.nmf_top_ylabel_pad_spin.setDecimals(15)
-        self.nmf_top_ylabel_pad_spin.setValue(10.0)  # 默认值
-        
-        self.nmf_top_ylabel_show_check = QCheckBox("显示上图Y轴标题")
-        self.nmf_top_ylabel_show_check.setChecked(True)  # 默认显示
-        
-        title_layout.addRow("上图Y轴标题控制:", self._create_h_layout([self.nmf_top_ylabel_show_check, QLabel("大小:"), self.nmf_top_ylabel_font_spin, QLabel("间距:"), self.nmf_top_ylabel_pad_spin]))
-        
-        title_layout.addRow("下图X轴标签:", self.nmf_xlabel_bottom_input)
-        
-        # NMF下图X轴标题控制：大小、间距、显示/隐藏
-        self.nmf_bottom_xlabel_font_spin = QSpinBox()
-        self.nmf_bottom_xlabel_font_spin.setRange(-999999999, 999999999)
-        self.nmf_bottom_xlabel_font_spin.setValue(16)  # 默认值
-        
-        self.nmf_bottom_xlabel_pad_spin = QDoubleSpinBox()
-        self.nmf_bottom_xlabel_pad_spin.setRange(-999999999.0, 999999999.0)
-        self.nmf_bottom_xlabel_pad_spin.setDecimals(15)
-        self.nmf_bottom_xlabel_pad_spin.setValue(10.0)  # 默认值
-        
-        self.nmf_bottom_xlabel_show_check = QCheckBox("显示下图X轴标题")
-        self.nmf_bottom_xlabel_show_check.setChecked(True)  # 默认显示
-        
-        title_layout.addRow("下图X轴标题控制:", self._create_h_layout([self.nmf_bottom_xlabel_show_check, QLabel("大小:"), self.nmf_bottom_xlabel_font_spin, QLabel("间距:"), self.nmf_bottom_xlabel_pad_spin]))
-        
-        title_layout.addRow("下图Y轴标签:", self.nmf_ylabel_bottom_input)
-        
-        # NMF下图Y轴标题控制：大小、间距、显示/隐藏
-        self.nmf_bottom_ylabel_font_spin = QSpinBox()
-        self.nmf_bottom_ylabel_font_spin.setRange(-999999999, 999999999)
-        self.nmf_bottom_ylabel_font_spin.setValue(16)  # 默认值
-        
-        self.nmf_bottom_ylabel_pad_spin = QDoubleSpinBox()
-        self.nmf_bottom_ylabel_pad_spin.setRange(-999999999.0, 999999999.0)
-        self.nmf_bottom_ylabel_pad_spin.setDecimals(15)
-        self.nmf_bottom_ylabel_pad_spin.setValue(10.0)  # 默认值
-        
-        self.nmf_bottom_ylabel_show_check = QCheckBox("显示下图Y轴标题")
-        self.nmf_bottom_ylabel_show_check.setChecked(True)  # 默认显示
-        
-        title_layout.addRow("下图Y轴标题控制:", self._create_h_layout([self.nmf_bottom_ylabel_show_check, QLabel("大小:"), self.nmf_bottom_ylabel_font_spin, QLabel("间距:"), self.nmf_bottom_ylabel_pad_spin]))
-        
-        style_layout.addRow(title_group)
-        
-        # 字体设置
-        self.nmf_title_font_spin = QSpinBox()
-        self.nmf_title_font_spin.setRange(-999999999, 999999999)
-        self.nmf_title_font_spin.setValue(16)
-        
-        self.nmf_tick_font_spin = QSpinBox()
-        self.nmf_tick_font_spin.setRange(-999999999, 999999999)
-        self.nmf_tick_font_spin.setValue(10)
-        
-        style_layout.addRow("标题 / 刻度字体:", self._create_h_layout([self.nmf_title_font_spin, self.nmf_tick_font_spin]))
-        
-        # NMF上图标题控制：大小、间距、显示/隐藏
-        self.nmf_top_title_font_spin = QSpinBox()
-        self.nmf_top_title_font_spin.setRange(-999999999, 999999999)
-        self.nmf_top_title_font_spin.setValue(16)  # 默认值
-        
-        self.nmf_top_title_pad_spin = QDoubleSpinBox()
-        self.nmf_top_title_pad_spin.setRange(-999999999.0, 999999999.0)
-        self.nmf_top_title_pad_spin.setDecimals(15)
-        self.nmf_top_title_pad_spin.setValue(10.0)  # 默认值
-        
-        self.nmf_top_title_show_check = QCheckBox("显示上图标题")
-        self.nmf_top_title_show_check.setChecked(True)  # 默认显示
-        
-        # NMF下图标题控制：大小、间距、显示/隐藏
-        self.nmf_bottom_title_font_spin = QSpinBox()
-        self.nmf_bottom_title_font_spin.setRange(-999999999, 999999999)
-        self.nmf_bottom_title_font_spin.setValue(16)  # 默认值
-        
-        self.nmf_bottom_title_pad_spin = QDoubleSpinBox()
-        self.nmf_bottom_title_pad_spin.setRange(-999999999.0, 999999999.0)
-        self.nmf_bottom_title_pad_spin.setDecimals(15)
-        self.nmf_bottom_title_pad_spin.setValue(10.0)  # 默认值
-        
-        self.nmf_bottom_title_show_check = QCheckBox("显示下图标题")
-        self.nmf_bottom_title_show_check.setChecked(True)  # 默认显示
-        
-        style_layout.addRow("上图标题控制:", self._create_h_layout([self.nmf_top_title_show_check, QLabel("大小:"), self.nmf_top_title_font_spin, QLabel("间距:"), self.nmf_top_title_pad_spin]))
-        style_layout.addRow("下图标题控制:", self._create_h_layout([self.nmf_bottom_title_show_check, QLabel("大小:"), self.nmf_bottom_title_font_spin, QLabel("间距:"), self.nmf_bottom_title_pad_spin]))
-        
-        # H (Spectra) 样式
-        self.nmf_comp_line_width = QDoubleSpinBox()
-        self.nmf_comp_line_width.setRange(-999999999.0, 999999999.0)
-        self.nmf_comp_line_width.setDecimals(15)
-        self.nmf_comp_line_width.setValue(2.0)
-        
-        self.nmf_comp_line_style = QComboBox()
-        self.nmf_comp_line_style.addItems(['-', '--', ':', '-.'])
-        self.nmf_comp_line_style.setCurrentText('-')
-        
-        style_layout.addRow("光谱线宽 / 线型:", self._create_h_layout([self.nmf_comp_line_width, self.nmf_comp_line_style]))
-        
-        self.comp1_color_input = QLineEdit("blue")
-        self.comp2_color_input = QLineEdit("red")
-        style_layout.addRow("Comp 1 颜色:", self._create_h_layout([self.comp1_color_input, self._create_color_picker_button(self.comp1_color_input)]))
-        style_layout.addRow("Comp 2 颜色:", self._create_h_layout([self.comp2_color_input, self._create_color_picker_button(self.comp2_color_input)]))
-        
-        # 连接颜色控件到自动更新
-        self.comp1_color_input.textChanged.connect(self._on_nmf_color_changed)
-        self.comp2_color_input.textChanged.connect(self._on_nmf_color_changed)
-
-        # W (Weights) 样式
-        self.nmf_weight_line_width = QDoubleSpinBox()
-        self.nmf_weight_line_width.setRange(-999999999.0, 999999999.0)
-        self.nmf_weight_line_width.setDecimals(15)
-        self.nmf_weight_line_width.setValue(1.0)
-        
-        self.nmf_weight_line_style = QComboBox()
-        self.nmf_weight_line_style.addItems(['-', '--', ':', ''])
-        self.nmf_weight_line_style.setCurrentText('-')
-        
-        self.nmf_marker_size = QSpinBox()
-        self.nmf_marker_size.setRange(-999999999, 999999999)
-        self.nmf_marker_size.setValue(8)
-
-        self.nmf_marker_style = QComboBox()
-        self.nmf_marker_style.addItems(['o', 'x', 's', 'D', '^'])
-        self.nmf_marker_style.setCurrentText('o')
-        
-        style_layout.addRow("权重线宽 / 线型:", self._create_h_layout([self.nmf_weight_line_width, self.nmf_weight_line_style]))
-        style_layout.addRow("标记大小 / 样式:", self._create_h_layout([self.nmf_marker_size, self.nmf_marker_style]))
-        
-        style_group.setContentLayout(style_layout)
-        layout.addWidget(style_group)
-        
-        # --- C. NMF 文件排序设置 ---
-        sort_group = CollapsibleGroupBox("📋 NMF 文件排序设置", is_expanded=True)
-        sort_layout = QFormLayout()
-        
-        self.nmf_sort_method_combo = QComboBox()
-        self.nmf_sort_method_combo.addItems(['按文件名排序', '按修改时间排序', '按文件大小排序', '自定义顺序'])
-        self.nmf_sort_method_combo.setCurrentText('按文件名排序')
-        self.nmf_sort_method_combo.currentTextChanged.connect(self._update_nmf_sort_preview)
-        
-        self.nmf_sort_reverse_check = QCheckBox("降序（Z→A）")
-        
-        self.nmf_file_preview_list = QListWidget()
-        self.nmf_file_preview_list.setMaximumHeight(150)
-        self.nmf_file_preview_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)  # 允许拖拽排序
-        self.nmf_file_preview_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # 允许多选
-        
-        # 添加右键菜单用于删除文件
-        self.nmf_file_preview_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.nmf_file_preview_list.customContextMenuRequested.connect(self._show_nmf_file_context_menu)
-        
-        self.nmf_refresh_preview_btn = QPushButton("刷新预览")
-        self.nmf_refresh_preview_btn.clicked.connect(self._update_nmf_sort_preview)
-        
-        self.nmf_remove_selected_btn = QPushButton("删除选中文件（不参与NMF）")
-        self.nmf_remove_selected_btn.clicked.connect(self._remove_selected_nmf_files)
-        
-        sort_layout.addRow("排序方式:", self.nmf_sort_method_combo)
-        sort_layout.addRow(self.nmf_sort_reverse_check)
-        sort_layout.addRow("文件顺序预览（可拖拽调整，右键删除）:", self.nmf_file_preview_list)
-        sort_layout.addRow(self._create_h_layout([self.nmf_refresh_preview_btn, self.nmf_remove_selected_btn]))
-        
-        sort_group.setContentLayout(sort_layout)
-        layout.addWidget(sort_group)
-        
-        # --- D. NMF 对照组设置 ---
-        control_group = CollapsibleGroupBox("NMF 对照组设置", is_expanded=True)
-        control_layout = QFormLayout()
-        
-        self.nmf_include_control_check = QCheckBox("对照组参与NMF解混分析")
-        self.nmf_include_control_check.setChecked(False)  # 默认不参与
-        control_layout.addRow(self.nmf_include_control_check)
-        
-        control_info_label = QLabel("提示：如果勾选，对照文件将参与NMF解混；否则仅用于绘图对比。")
-        control_info_label.setWordWrap(True)
-        control_layout.addRow(control_info_label)
-        
-        control_group.setContentLayout(control_layout)
-        layout.addWidget(control_group)
-        
-        # --- C. 运行按钮 ---
-        # NMF运行按钮已移到主界面左侧按钮区，这里不再需要
-        layout.addStretch(1)
-        
-        # 添加 NMF 提示
-        info_label = QLabel("提示：NMF 分析将使用GUI中设置的所有预处理选项（QC、BE校正、平滑、基线校正、归一化等）。\n最终会将负值置零以满足NMF的非负要求。请确保在 'X 轴物理截断' 中设置了范围（例如 > 600 cm⁻¹）。")
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
-        
-        # 独立窗口模式下，直接返回 NMF 设置页
-        return tab2
-
-    # --- Tab 3: 物理验证 ---
-    def setup_physics_tab(self):
-        tab3 = QWidget()
-        layout = QVBoxLayout(tab3)
-        
-        # 3.1 Bose-Einstein 校正 (移除，已整合到预处理)
-        
-        # 3.2 瑞利散射尾拟合 (修改为叠加模式)
-        fit_group = CollapsibleGroupBox("📈 散射尾部拟合 (叠加到当前图)", is_expanded=True)
-        fit_layout = QFormLayout()
-        
-        self.fit_cutoff_spin = QDoubleSpinBox()
-        self.fit_cutoff_spin.setRange(-999999999.0, 999999999.0)
-        self.fit_cutoff_spin.setDecimals(15)
-        self.fit_cutoff_spin.setValue(400.0)
-        
-        self.fit_model_combo = QComboBox()
-        self.fit_model_combo.addItems(['Lorentzian', 'Gaussian'])
-        fit_layout.addRow("拟合截止波数 (cm⁻¹):", self.fit_cutoff_spin)
-        fit_layout.addRow("拟合模型:", self.fit_model_combo)
-        
-        # 拟合曲线样式控制
-        self.fit_line_color_input = QLineEdit("magenta")
-        self.fit_line_style_combo = QComboBox()
-        self.fit_line_style_combo.addItems(['-', '--', '-.', ':'])
-        self.fit_line_style_combo.setCurrentText('--')
-        
-        self.fit_line_width_spin = QDoubleSpinBox()
-        self.fit_line_width_spin.setRange(-999999999.0, 999999999.0)
-        self.fit_line_width_spin.setDecimals(15)
-        self.fit_line_width_spin.setValue(2.5)
-        
-        self.fit_marker_combo = QComboBox()
-        self.fit_marker_combo.addItems(['无', 'o', 's', '^', 'D', 'x', '+', '*'])
-        self.fit_marker_combo.setCurrentText('无')
-        
-        self.fit_marker_size_spin = QDoubleSpinBox()
-        self.fit_marker_size_spin.setRange(-999999999.0, 999999999.0)
-        self.fit_marker_size_spin.setDecimals(15)
-        self.fit_marker_size_spin.setValue(5.0)
-        
-        fit_layout.addRow("拟合线颜色:", self._create_h_layout([self.fit_line_color_input, self._create_color_picker_button(self.fit_line_color_input)]))
-        fit_layout.addRow("拟合线型 / 线宽:", self._create_h_layout([self.fit_line_style_combo, self.fit_line_width_spin]))
-        fit_layout.addRow("标记样式 / 大小:", self._create_h_layout([self.fit_marker_combo, self.fit_marker_size_spin]))
-        
-        # 拟合曲线图例控制
-        self.fit_legend_label_input = QLineEdit("")
-        self.fit_legend_label_input.setPlaceholderText("留空则自动生成，例如: Fit: 文件名")
-        
-        self.fit_show_legend_check = QCheckBox("显示拟合曲线图例")
-        self.fit_show_legend_check.setChecked(True)
-        self.fit_show_legend_check.setToolTip("遵循主菜单的图例显示设置，但可以单独控制拟合曲线的图例")
-        
-        fit_layout.addRow("图例标签:", self.fit_legend_label_input)
-        fit_layout.addRow("", self.fit_show_legend_check)
-        
-        # 支持多条拟合曲线
-        self.fit_curve_count_spin = QSpinBox()
-        self.fit_curve_count_spin.setRange(-999999999, 999999999)
-        self.fit_curve_count_spin.setValue(1)
-        self.fit_curve_count_spin.setToolTip("可以多次运行拟合，每次生成一条曲线，最多支持10条")
-        
-        self.btn_clear_fits = QPushButton("清除所有拟合曲线")
-        self.btn_clear_fits.setStyleSheet("background-color: #FF5722; color: white; font-weight: bold;")
-        self.btn_clear_fits.clicked.connect(self.clear_all_fit_curves)
-        
-        fit_layout.addRow("拟合曲线数量:", self.fit_curve_count_spin)
-        fit_layout.addRow("", self.btn_clear_fits)
-        
-        self.btn_run_fit = QPushButton("运行拟合并叠加到当前图")
-        self.btn_run_fit.setStyleSheet("background-color: #555555; color: white; font-weight: bold;")
-        self.btn_run_fit.clicked.connect(self.run_scattering_fit_overlay)
-        fit_layout.addRow("", self.btn_run_fit)
-        
-        self.fit_output_text = QTextEdit()
-        self.fit_output_text.setReadOnly(True)
-        self.fit_output_text.setFixedHeight(150)
-        fit_layout.addRow("拟合结果:", self.fit_output_text)
-        
-        fit_group.setContentLayout(fit_layout)
-        layout.addWidget(fit_group)
-        
-        # 存储拟合曲线信息（用于清除和样式管理）
-        self.fit_curves_info = []  # 存储拟合曲线的信息列表
-        layout.addStretch(1)
-        
-        # 独立窗口模式下，直接返回物理验证页
-        return tab3
 
     # --- 辅助逻辑 (文件扫描和重命名) ---
     def browse_folder(self):
@@ -3034,27 +2316,30 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             folder_path = self.folder_input.text()
             if not os.path.isdir(folder_path): return
 
-            self.legend_rename_widgets.clear()
-            self._clear_layout_recursively(self.rename_layout)
+            # 获取 rename_layout（可能在 peak_detection_tab 中）
+            rename_layout = None
+            if hasattr(self, 'peak_detection_tab') and hasattr(self.peak_detection_tab, 'rename_layout'):
+                rename_layout = self.peak_detection_tab.rename_layout
+            elif hasattr(self, 'rename_layout'):
+                rename_layout = self.rename_layout
             
-            # 1. 扫描文件（用于主图）
-            csv_files = glob.glob(os.path.join(folder_path, '*.csv'))
-            txt_files = glob.glob(os.path.join(folder_path, '*.txt'))
-            file_list_full = sorted(csv_files + txt_files) 
+            if rename_layout:
+                self.legend_rename_widgets.clear()
+                self._clear_layout_recursively(rename_layout)
             
-            # 2. 扫描分组（用于瀑布图）
+            # 使用 FileService 扫描文件
             n_chars = self.n_chars_spin.value()
-            groups = group_files_by_name(file_list_full, n_chars)
+            target_groups = [x.strip() for x in self.groups_input.text().split(',') if x.strip()]
             
-            # 筛选指定组（如果设置了）
-            target_gs = [x.strip() for x in self.groups_input.text().split(',') if x.strip()]
-            if target_gs:
-                groups = {k: v for k, v in groups.items() if k in target_gs}
+            rename_data = self.file_service.scan_and_load_legend_rename_data(
+                folder_path=folder_path,
+                n_chars=n_chars,
+                target_groups=target_groups if target_groups else None
+            )
             
-            # 3. 先收集所有组中的文件，避免重复添加
-            files_in_groups = set()
-            for g_files in groups.values():
-                files_in_groups.update(g_files)
+            groups = rename_data['groups']
+            file_list_full = rename_data['files']
+            files_in_groups = rename_data['files_in_groups']
                 
             # 4. 为组名创建重命名选项（用于瀑布图）- 包括平均线和标准方差
             for g_name in sorted(groups.keys()):
@@ -3084,7 +2369,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 h1.addWidget(rename_input_base)
                 h1.addWidget(delete_btn1)
                 h1.addStretch(1)
-                self.rename_layout.addWidget(widget_container1)
+                if rename_layout:
+                    rename_layout.addWidget(widget_container1)
                 self.legend_rename_widgets[g_name] = rename_input_base
                 
                 # 4.2 平均线图例 (Avg)
@@ -3113,7 +2399,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 h2.addWidget(rename_input_avg)
                 h2.addWidget(delete_btn2)
                 h2.addStretch(1)
-                self.rename_layout.addWidget(widget_container2)
+                if rename_layout:
+                    rename_layout.addWidget(widget_container2)
                 self.legend_rename_widgets[f"{g_name} (Avg)"] = rename_input_avg
                 
                 # 4.3 标准方差图例 (± Std)
@@ -3142,7 +2429,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 h3.addWidget(rename_input_std)
                 h3.addWidget(delete_btn3)
                 h3.addStretch(1)
-                self.rename_layout.addWidget(widget_container3)
+                if rename_layout:
+                    rename_layout.addWidget(widget_container3)
                 self.legend_rename_widgets[f"{g_name} ± Std"] = rename_input_std
             
             # 5. 为组名添加Mean + Shadow模式的图例项（如果组中有多个文件）
@@ -3178,7 +2466,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                         h_mean.addWidget(rename_input_mean)
                         h_mean.addWidget(delete_btn_mean)
                         h_mean.addStretch(1)
-                        self.rename_layout.addWidget(widget_container_mean)
+                        if rename_layout:
+                            rename_layout.addWidget(widget_container_mean)
                         self.legend_rename_widgets[mean_key] = rename_input_mean
                     
                     # 5.2 Std Dev图例
@@ -3209,7 +2498,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                         h_std.addWidget(rename_input_std)
                         h_std.addWidget(delete_btn_std)
                         h_std.addStretch(1)
-                        self.rename_layout.addWidget(widget_container_std)
+                        if rename_layout:
+                            rename_layout.addWidget(widget_container_std)
                         self.legend_rename_widgets[std_key] = rename_input_std
             
             # 6. 为柱状图添加图例项（定量校准结果）
@@ -3247,7 +2537,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                     h.addWidget(rename_input)
                     h.addWidget(delete_btn)
                     h.addStretch(1)
-                    self.rename_layout.addWidget(widget_container)
+                    if rename_layout:
+                        rename_layout.addWidget(widget_container)
                     self.legend_rename_widgets[item] = rename_input
             
             # 7. 为NMF解谱图添加图例项（如果NMF窗口存在）
@@ -3281,7 +2572,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                             h.addWidget(rename_input)
                             h.addWidget(delete_btn)
                             h.addStretch(1)
-                            self.rename_layout.addWidget(widget_container)
+                            if rename_layout:
+                                rename_layout.addWidget(widget_container)
                             self.legend_rename_widgets[nmf_label] = rename_input
             
             # 8. 为拟合验证图添加图例项
@@ -3317,7 +2609,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                     h.addWidget(rename_input)
                     h.addWidget(delete_btn)
                     h.addStretch(1)
-                    self.rename_layout.addWidget(widget_container)
+                    if rename_layout:
+                        rename_layout.addWidget(widget_container)
                     self.legend_rename_widgets[item] = rename_input
             
             # 9. 为文件创建重命名选项（用于主图）
@@ -3368,10 +2661,12 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 h.addWidget(delete_btn)
                 h.addStretch(1)
                 
-                self.rename_layout.addWidget(widget_container)
+                if rename_layout:
+                    rename_layout.addWidget(widget_container)
                 self.legend_rename_widgets[base_name] = rename_input
 
-            self.rename_layout.addStretch(1)
+            if rename_layout:
+                rename_layout.addStretch(1)
         except Exception:
             traceback.print_exc()
 
@@ -3714,12 +3009,26 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                     'sqrt_offset': widgets['sqrt_offset'].value()
                 }
         if preserve_values and hasattr(self, 'nmf_component_rename_widgets'):
-            for comp_label, rename_widget in self.nmf_component_rename_widgets.items():
-                old_rename_values[comp_label] = rename_widget.text()
+            try:
+                for comp_label, rename_widget in list(self.nmf_component_rename_widgets.items()):
+                    old_rename_values[comp_label] = self._safe_get_widget_text(rename_widget)
+            except (RuntimeError, AttributeError):
+                pass
         
         # 清除旧的NMF组分控制项
         self.nmf_component_control_widgets.clear()
         self.nmf_component_rename_widgets.clear()
+        # 确保布局存在
+        if not hasattr(self, 'nmf_component_controls_layout') or self.nmf_component_controls_layout is None:
+            # 如果布局不存在，创建它
+            if not hasattr(self, 'nmf_component_controls_widget'):
+                from PyQt6.QtWidgets import QWidget, QVBoxLayout
+                self.nmf_component_controls_layout = QVBoxLayout()
+                self.nmf_component_controls_widget = QWidget()
+                self.nmf_component_controls_widget.setLayout(self.nmf_component_controls_layout)
+            else:
+                self.nmf_component_controls_layout = QVBoxLayout()
+                self.nmf_component_controls_widget.setLayout(self.nmf_component_controls_layout)
         self._clear_layout_recursively(self.nmf_component_controls_layout)
         
         # 为每个组分创建控制项
@@ -3930,9 +3239,13 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             # 获取样式参数
             style_params = self._get_current_style_params()
 
-            # 物理截断值
-            x_min_phys = self._parse_optional_float(self.x_min_phys_input.text())
-            x_max_phys = self._parse_optional_float(self.x_max_phys_input.text())
+            # 物理截断值（确保控件存在）
+            x_min_phys = None
+            x_max_phys = None
+            if hasattr(self, 'x_min_phys_input') and self.x_min_phys_input:
+                x_min_phys = self._parse_optional_float(self.x_min_phys_input.text())
+            if hasattr(self, 'x_max_phys_input') and self.x_max_phys_input:
+                x_max_phys = self._parse_optional_float(self.x_max_phys_input.text())
 
             # 从面板获取配置（如果可用）
             config = None
@@ -4109,62 +3422,79 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             # 读取独立控件值（包括颜色）
             ind_params = {}
             group_colors = {}  # 存储组颜色（用于Mean + Shadow模式）
-            for k, v in self.individual_control_widgets.items():
-                transform_type = v['transform'].currentText()
-                transform_mode = 'none'
-                transform_params = {}
-                
-                if transform_type == '对数变换 (Log)':
-                    transform_mode = 'log'
-                    transform_params = {
-                        'base': float(v['log_base'].currentText()) if v['log_base'].currentText() == '10' else np.e,
-                        'offset': v['log_offset'].value()
-                    }
-                elif transform_type == '平方根变换 (Sqrt)':
-                    transform_mode = 'sqrt'
-                    transform_params = {
-                        'offset': v['sqrt_offset'].value()
-                    }
-                
-                ind_params[k] = {
-                    'scale': v['scale'].value(),
-                    'offset': v['offset'].value(),
-                    'color': v.get('color', None),  # 添加颜色信息
-                    'transform': transform_mode,
-                    'transform_params': transform_params
-                }
-                
-                # 收集组颜色（用于Mean + Shadow模式）
-                # 从文件名提取组名（使用分组前缀长度）
-                n_chars = self.n_chars_spin.value()
-                if n_chars > 0:
-                    group_name = k[:n_chars] if len(k) >= n_chars else k
-                else:
-                    group_name = k  # 使用完整文件名作为组名
-                
-                # 如果该组还没有颜色，使用当前文件的颜色
-                if group_name not in group_colors:
-                    color_text = v.get('color', None)
-                    if color_text and hasattr(color_text, 'text'):
-                        color_value = color_text.text().strip() or None
-                        if color_value:
-                            group_colors[group_name] = color_value
+            if hasattr(self, 'individual_control_widgets'):
+                try:
+                    for k, v in list(self.individual_control_widgets.items()):
+                        try:
+                            transform_type = v['transform'].currentText()
+                            transform_mode = 'none'
+                            transform_params = {}
+
+                            if transform_type == '对数变换 (Log)':
+                                transform_mode = 'log'
+                                transform_params = {
+                                    'base': float(v['log_base'].currentText()) if v['log_base'].currentText() == '10' else np.e,
+                                    'offset': v['log_offset'].value()
+                                }
+                            elif transform_type == '平方根变换 (Sqrt)':
+                                transform_mode = 'sqrt'
+                                transform_params = {
+                                    'offset': v['sqrt_offset'].value()
+                                }
+
+                            ind_params[k] = {
+                                'scale': v['scale'].value(),
+                                'offset': v['offset'].value(),
+                                'color': v.get('color', None),  # 添加颜色信息
+                                'transform': transform_mode,
+                                'transform_params': transform_params
+                            }
+
+                            # 收集组颜色（用于Mean + Shadow模式）
+                            # 从文件名提取组名（使用分组前缀长度）
+                            n_chars = self.n_chars_spin.value()
+                            if n_chars > 0:
+                                group_name = k[:n_chars] if len(k) >= n_chars else k
+                            else:
+                                group_name = k  # 使用完整文件名作为组名
+
+                            # 如果该组还没有颜色，使用当前文件的颜色
+                            if group_name not in group_colors:
+                                color_text = v.get('color', None)
+                                if color_text:
+                                    try:
+                                        color_value = self._safe_get_widget_text(color_text)
+                                        if color_value:
+                                            group_colors[group_name] = color_value
+                                    except (RuntimeError, AttributeError, KeyError):
+                                        pass
+                        except (RuntimeError, AttributeError):
+                            pass
+                except (RuntimeError, AttributeError):
+                    pass
             
             params['individual_y_params'] = ind_params
             params['group_colors'] = group_colors  # 传递组颜色
             
             # 构建文件颜色映射（用于绘图时获取颜色）
             file_colors = {}
-            for k, v in self.individual_control_widgets.items():
-                color_widget = v.get('color')
-                if color_widget and hasattr(color_widget, 'text'):
-                    color_text = color_widget.text().strip()
-                    if color_text:
-                        file_colors[k] = color_text
+            if hasattr(self, 'individual_control_widgets'):
+                try:
+                    for k, v in list(self.individual_control_widgets.items()):
+                        try:
+                            color_widget = v.get('color')
+                            if color_widget:
+                                color_text = self._safe_get_widget_text(color_widget)
+                                if color_text:
+                                    file_colors[k] = color_text
+                        except (RuntimeError, AttributeError, KeyError):
+                            continue
+                except (RuntimeError, AttributeError):
+                    pass
             params['file_colors'] = file_colors
             
-            # 读取重命名
-            rename_map = {k: v.text().strip() for k, v in self.legend_rename_widgets.items() if v.text().strip()}
+            # 读取重命名（使用安全方法）
+            rename_map = self._safe_get_legend_rename_map()
             params['legend_names'] = rename_map
 
             # 如果提供了grouped_files_data和control_data_list，直接使用
@@ -4290,9 +3620,13 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             folder = self.folder_input.text()
             if not os.path.isdir(folder): return
             
-            # 物理截断值
-            x_min_phys = self._parse_optional_float(self.x_min_phys_input.text())
-            x_max_phys = self._parse_optional_float(self.x_max_phys_input.text())
+            # 物理截断值（确保控件存在）
+            x_min_phys = None
+            x_max_phys = None
+            if hasattr(self, 'x_min_phys_input') and self.x_min_phys_input:
+                x_min_phys = self._parse_optional_float(self.x_min_phys_input.text())
+            if hasattr(self, 'x_max_phys_input') and self.x_max_phys_input:
+                x_max_phys = self._parse_optional_float(self.x_max_phys_input.text())
             
             # 从面板获取配置（如果可用）
             config = None
@@ -4414,11 +3748,16 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                     
                     if g_name not in self.plot_windows:
                         # 创建新窗口（不指定位置，让窗口自动计算远离主菜单的位置）
-                        self.plot_windows[g_name] = MplPlotWindow(g_name, initial_geometry=None, parent=self)
+                        plot_window = MplPlotWindow(g_name, initial_geometry=None, parent=self)
+                        # 连接窗口关闭事件，标记项目为已更改
+                        plot_window.finished.connect(lambda checked=False, name=g_name: self._on_plot_window_closed(name))
+                        self.plot_windows[g_name] = plot_window
                     
                     win = self.plot_windows[g_name]
                     # 更新活动绘图窗口引用
                     self.active_plot_window = win
+                    # 保存plot_params以便项目恢复时使用
+                    win._last_plot_params = params.copy()
                     # 更新绘图（会自动保持窗口位置和大小）
                     win.update_plot(params)
                     # 确保窗口显示
@@ -4427,6 +3766,9 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                     
                     # 记录当前激活的绘图窗口
                     self.active_plot_window = win
+                
+            # 标记项目有未保存的更改
+            self._mark_project_changed()
                 
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
@@ -4507,8 +3849,16 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         """
         处理NMF按钮点击事件，根据单选按钮状态调用标准NMF或组分回归模式
         """
-        # 检查运行模式
-        if self.nmf_mode_regression.isChecked():
+        # 确保 NMF Tab 已创建
+        if not hasattr(self, 'nmf_tab') or self.nmf_tab is None:
+            self.nmf_tab = self._create_nmf_tab_content()
+        
+        # 检查运行模式（确保控件存在）
+        use_regression_mode = False
+        if hasattr(self, 'nmf_mode_regression') and self.nmf_mode_regression:
+            use_regression_mode = self.nmf_mode_regression.isChecked()
+        
+        if use_regression_mode:
             # 组分回归模式：使用固定的H矩阵
             if self.last_fixed_H is None:
                 QMessageBox.warning(self, "NMF 警告", "请先运行标准NMF分析以获取固定的H矩阵。")
@@ -4686,33 +4036,41 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             nmf_legend_names = {}
             # 首先从NMF组件重命名控件获取
             if hasattr(self, 'nmf_component_rename_widgets'):
-                for comp_label, rename_widget in self.nmf_component_rename_widgets.items():
-                    new_name = rename_widget.text().strip()
+                try:
+                    for comp_label, rename_widget in list(self.nmf_component_rename_widgets.items()):
+                        new_name = self._safe_get_widget_text(rename_widget)
                     if new_name:
                         nmf_legend_names[comp_label] = new_name
+                except (RuntimeError, AttributeError):
+                    pass
             # 然后从主窗口的legend_rename_widgets获取（优先级更高）
             if hasattr(self, 'legend_rename_widgets'):
-                for key, widget in self.legend_rename_widgets.items():
-                    if hasattr(widget, 'text'):
-                        renamed = widget.text().strip()
+                try:
+                    for key, widget in list(self.legend_rename_widgets.items()):
+                        renamed = self._safe_get_widget_text(widget)
                         if renamed and key.startswith('NMF Component'):
                             # 提取组件编号
                             comp_num = key.replace('NMF Component ', '')
                             comp_label = f"Component {comp_num}"
                             nmf_legend_names[comp_label] = renamed
+                except (RuntimeError, AttributeError):
+                    pass
             
             # 为对照组数据添加独立Y轴参数（如果存在）
             for ctrl_data in control_data_for_plot:
                 ctrl_label = ctrl_data['label']
                 # 检查组回归模式中是否有对应的独立Y轴控制项
                 if hasattr(self, 'individual_control_widgets') and ctrl_label in self.individual_control_widgets:
-                    widgets = self.individual_control_widgets[ctrl_label]
-                    individual_y_params[ctrl_label] = {
-                        'scale': widgets['scale'].value(),
-                        'offset': widgets['offset'].value(),
-                        'transform': 'none',  # 对照组不使用变换
-                        'transform_params': {}
-                    }
+                    try:
+                        widgets = self.individual_control_widgets[ctrl_label]
+                        individual_y_params[ctrl_label] = {
+                            'scale': widgets['scale'].value(),
+                            'offset': widgets['offset'].value(),
+                            'transform': 'none',  # 对照组不使用变换
+                            'transform_params': {}
+                        }
+                    except (RuntimeError, AttributeError, KeyError):
+                        pass
             
             # 获取垂直参考线参数（从主菜单）
             vertical_lines = []
@@ -5132,6 +4490,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             filter_components = self.nmf_pca_comp_spin.value()  # 预滤波成分数
             nmf_components = self.nmf_comp_spin.value()  # 最终 NMF 组件数
             max_iter = self.nmf_max_iter.value()
+            # 获取收敛容差（如果存在，否则使用默认值）
+            tol = self.nmf_tol.value() if hasattr(self, 'nmf_tol') else 1e-4
             
             # 检查成分数合法性
             if pca_filter_enabled and filter_components < nmf_components:
@@ -5172,7 +4532,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                     pipeline = Pipeline([
                         ('filter', PCA(n_components=filter_components)),
                         ('nonneg', NonNegativeTransformer()),
-                        ('nmf', NMF(n_components=nmf_components, init=nmf_init, random_state=42, max_iter=max_iter))
+                        ('nmf', NMF(n_components=nmf_components, init=nmf_init, random_state=42, max_iter=max_iter, tol=tol))
                     ])
                 elif filter_algorithm == 'Deep Autoencoder (PyTorch)':
                     # Use the new PyTorch-based Transformer with user-specified random seed
@@ -5181,20 +4541,20 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                         ('filter', AutoencoderTransformer(n_components=filter_components, use_deep=True, 
                                                          max_iter=max_iter, random_state=random_seed)),
                         ('nonneg', NonNegativeTransformer()), # Double check for non-negativity
-                        ('nmf', NMF(n_components=nmf_components, init=nmf_init, random_state=42, max_iter=max_iter))
+                        ('nmf', NMF(n_components=nmf_components, init=nmf_init, random_state=42, max_iter=max_iter, tol=tol))
                     ])
                 elif 'Autoencoder' in filter_algorithm: # Fallback sklearn AE
                      pipeline = Pipeline([
                         ('filter', AutoencoderTransformer(n_components=filter_components, use_deep=False, 
                                                          max_iter=max_iter, random_state=42)),
                         ('nonneg', NonNegativeTransformer()),
-                        ('nmf', NMF(n_components=nmf_components, init=nmf_init, random_state=42, max_iter=max_iter))
+                        ('nmf', NMF(n_components=nmf_components, init=nmf_init, random_state=42, max_iter=max_iter, tol=tol))
                     ])
                 else: # NMF -> NMF
                     pipeline = Pipeline([
-                        ('filter', NMF(n_components=filter_components, init=filter_init, random_state=42, max_iter=max_iter)),
+                        ('filter', NMF(n_components=filter_components, init=filter_init, random_state=42, max_iter=max_iter, tol=tol)),
                         ('nonneg', NonNegativeTransformer()),
-                        ('nmf', NMF(n_components=nmf_components, init=nmf_init, random_state=42, max_iter=max_iter))
+                        ('nmf', NMF(n_components=nmf_components, init=nmf_init, random_state=42, max_iter=max_iter, tol=tol))
                     ])
                 
                 # 训练 Pipeline（在加权数据上）
@@ -5317,7 +4677,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 self.last_common_x = common_x.copy()
             else:
                 # 标准 NMF (不启用预滤波)
-                model = NMF(n_components=nmf_components, init=nmf_init, random_state=42, max_iter=max_iter)
+                model = NMF(n_components=nmf_components, init=nmf_init, random_state=42, max_iter=max_iter, tol=tol)
                 W = model.fit_transform(X)
                 H = model.components_
                 
@@ -5366,23 +4726,29 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             # 收集NMF组分图例重命名
             nmf_legend_names = {}
             if hasattr(self, 'nmf_component_rename_widgets'):
-                for comp_label, rename_widget in self.nmf_component_rename_widgets.items():
-                    new_name = rename_widget.text().strip()
+                try:
+                    for comp_label, rename_widget in list(self.nmf_component_rename_widgets.items()):
+                        new_name = self._safe_get_widget_text(rename_widget)
                     if new_name:  # 如果输入了新名称，使用新名称；否则使用默认名称
                         nmf_legend_names[comp_label] = new_name
+                except (RuntimeError, AttributeError):
+                    pass
             
             # 为对照组数据添加独立Y轴参数（如果存在）
             for ctrl_data in control_data_for_plot:
                 ctrl_label = ctrl_data['label']
                 # 检查是否有对应的独立Y轴控制项
                 if hasattr(self, 'individual_control_widgets') and ctrl_label in self.individual_control_widgets:
-                    widgets = self.individual_control_widgets[ctrl_label]
-                    individual_y_params[ctrl_label] = {
-                        'scale': widgets['scale'].value(),
-                        'offset': widgets['offset'].value(),
-                        'transform': 'none',  # 对照组不使用变换
-                        'transform_params': {}
-                    }
+                    try:
+                        widgets = self.individual_control_widgets[ctrl_label]
+                        individual_y_params[ctrl_label] = {
+                            'scale': widgets['scale'].value(),
+                            'offset': widgets['offset'].value(),
+                            'transform': 'none',  # 对照组不使用变换
+                            'transform_params': {}
+                        }
+                    except (RuntimeError, AttributeError, KeyError):
+                        pass
             
             # 获取垂直参考线参数（从主菜单）
             vertical_lines = []
@@ -5469,6 +4835,9 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 win.set_data(W, H, common_x, nmf_style_params, sample_labels)
                 self.nmf_window = win
                 win.show()
+            
+            # 标记项目有未保存的更改
+            self._mark_project_changed()
             
         except Exception as e:
             QMessageBox.critical(self, "NMF Error", f"NMF 运行失败: {str(e)}")
@@ -5889,9 +5258,13 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             folder = self.folder_input.text()
             if not os.path.isdir(folder): return
 
-            # 物理截断值
-            x_min_phys = self._parse_optional_float(self.x_min_phys_input.text())
-            x_max_phys = self._parse_optional_float(self.x_max_phys_input.text())
+            # 物理截断值（确保控件存在）
+            x_min_phys = None
+            x_max_phys = None
+            if hasattr(self, 'x_min_phys_input') and self.x_min_phys_input:
+                x_min_phys = self._parse_optional_float(self.x_min_phys_input.text())
+            if hasattr(self, 'x_max_phys_input') and self.x_max_phys_input:
+                x_max_phys = self._parse_optional_float(self.x_max_phys_input.text())
 
             # 1. 读取基础参数
             skip = self.skip_rows_spin.value()
@@ -5922,8 +5295,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             # 对组名进行排序 (尝试按数字逻辑排序，否则按字母)
             sorted_keys = sorted(groups.keys())
             
-            # 获取重命名映射（在循环外计算一次）
-            rename_map = {k: v.text().strip() for k, v in self.legend_rename_widgets.items() if v.text().strip()}
+            # 获取重命名映射（在循环外计算一次，使用安全方法）
+            rename_map = self._safe_get_legend_rename_map()
             
             # 4. 循环处理每一组
             for i, g_name in enumerate(sorted_keys):
@@ -5975,18 +5348,18 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 y_plot = y_avg * scale
                 y_std_plot = y_std * scale
                 
-                # 是否求导
-                if self.derivative_check.isChecked():
-                    d1 = np.gradient(y_plot, common_x)
-                    y_plot = np.gradient(d1, common_x)
-                    # 求导模式下不绘制阴影
-                    y_std_plot = None
+                # 注意：二次导数已在预处理流程中应用，不再需要单独的控件
+                # 如果需要二次导数，应该在预处理参数中设置
                 
                 # 使用组的独立堆叠位移（如果存在），否则使用全局默认值
-                if g_name in self.group_waterfall_control_widgets:
-                    group_offset = self.group_waterfall_control_widgets[g_name]['offset'].value()
-                else:
-                    group_offset = i * offset_step  # 回退到全局默认值
+                group_offset = i * offset_step  # 默认值
+                if hasattr(self, 'group_waterfall_control_widgets') and g_name in self.group_waterfall_control_widgets:
+                    try:
+                        offset_widget = self.group_waterfall_control_widgets[g_name].get('offset')
+                        if offset_widget and hasattr(offset_widget, 'value'):
+                            group_offset = offset_widget.value()
+                    except (RuntimeError, AttributeError):
+                        pass
                 
                 final_y = y_plot + group_offset
                 final_y_upper = (y_plot + y_std_plot) + group_offset if y_std_plot is not None else None
@@ -5996,33 +5369,39 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 color = colors[i % len(colors)]  # 默认颜色
                 
                 # 1. 首先检查组瀑布图的独立颜色控件
-                if g_name in self.group_waterfall_control_widgets:
-                    color_widget = self.group_waterfall_control_widgets[g_name].get('color')
-                    if color_widget and hasattr(color_widget, 'text'):
-                        color_text = color_widget.text().strip()
-                        if color_text:
-                            try:
-                                import matplotlib.colors as mcolors
-                                mcolors.to_rgba(color_text)  # 验证颜色
-                                color = color_text
-                            except (ValueError, AttributeError):
-                                pass  # 如果颜色无效，继续尝试其他颜色源
-                
-                # 2. 如果组瀑布图没有独立颜色，则从individual_control_widgets中获取该组第一个文件的颜色
-                if color == colors[i % len(colors)] and g_files and hasattr(self, 'individual_control_widgets'):
-                    first_file_base = os.path.splitext(os.path.basename(g_files[0]))[0]
-                    if first_file_base in self.individual_control_widgets:
-                        color_widget = self.individual_control_widgets[first_file_base].get('color')
-                        if color_widget and hasattr(color_widget, 'text'):
-                            color_text = color_widget.text().strip()
+                if hasattr(self, 'group_waterfall_control_widgets') and g_name in self.group_waterfall_control_widgets:
+                    try:
+                        color_widget = self.group_waterfall_control_widgets[g_name].get('color')
+                        if color_widget:
+                            color_text = self._safe_get_widget_text(color_widget)
                             if color_text:
-                                # 验证颜色有效性
                                 try:
                                     import matplotlib.colors as mcolors
                                     mcolors.to_rgba(color_text)  # 验证颜色
                                     color = color_text
                                 except (ValueError, AttributeError):
-                                    pass  # 如果颜色无效，使用默认颜色
+                                    pass  # 如果颜色无效，继续尝试其他颜色源
+                    except (RuntimeError, AttributeError):
+                        pass
+                
+                # 2. 如果组瀑布图没有独立颜色，则从individual_control_widgets中获取该组第一个文件的颜色
+                if color == colors[i % len(colors)] and g_files and hasattr(self, 'individual_control_widgets'):
+                    try:
+                        first_file_base = os.path.splitext(os.path.basename(g_files[0]))[0]
+                        if first_file_base in self.individual_control_widgets:
+                            color_widget = self.individual_control_widgets[first_file_base].get('color')
+                            if color_widget:
+                                color_text = self._safe_get_widget_text(color_widget)
+                                if color_text:
+                                    # 验证颜色有效性
+                                    try:
+                                        import matplotlib.colors as mcolors
+                                        mcolors.to_rgba(color_text)  # 验证颜色
+                                        color = color_text
+                                    except (ValueError, AttributeError):
+                                        pass  # 如果颜色无效，使用默认颜色
+                    except (RuntimeError, AttributeError):
+                        pass
                 
                 # 使用重命名后的组名（如果有）
                 base_display_name = rename_map.get(g_name, g_name)
@@ -6080,11 +5459,106 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 label_text = avg_label
                 
                 if plot_style == 'line':
-                    ax.plot(common_x, final_y, label=label_text, color=color, 
+                    line_obj = ax.plot(common_x, final_y, label=label_text, color=color, 
                            linewidth=line_width, linestyle=line_style)
                 else:  # scatter
-                    ax.plot(common_x, final_y, label=label_text, color=color, 
+                    line_obj = ax.plot(common_x, final_y, label=label_text, color=color, 
                            marker='.', linestyle='', markersize=line_width*3)
+                
+                # 保存绘图数据用于谱线扫描（在循环结束后统一处理）
+                if not hasattr(win, 'waterfall_plot_data'):
+                    win.waterfall_plot_data = []
+                win.waterfall_plot_data.append({
+                    'x': common_x,
+                    'y': final_y,
+                    'label': label_text,
+                    'color': color,
+                    'linewidth': line_width,
+                    'linestyle': line_style,
+                    'type': 'line' if plot_style == 'line' else 'scatter',
+                    'shadow_upper': final_y_upper,
+                    'shadow_lower': final_y_lower,
+                    'shadow_color': color,
+                    'shadow_alpha': safe_alpha,
+                    'shadow_label': std_label  # 保存阴影标签
+                })
+                
+                # 峰值检测（如果启用）
+                if hasattr(self, 'peak_check') and self.peak_check.isChecked():
+                    try:
+                        from src.core.peak_detection_helper import detect_and_plot_peaks
+                        peak_params = self._get_peak_detection_params()
+                        detect_and_plot_peaks(ax, common_x, final_y, final_y, peak_params, color=color)
+                    except Exception as e:
+                        print(f"峰值检测失败: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+            # 应用谱线扫描（如果启用）
+            if hasattr(win, 'waterfall_plot_data') and win.waterfall_plot_data:
+                try:
+                    if hasattr(self, 'spectrum_scan_panel') and self.spectrum_scan_panel:
+                        config = self.spectrum_scan_panel.get_config()
+                        ss = config.spectrum_scan
+                        if ss and ss.enabled:
+                            # 扫描谱线
+                            scanned = self.spectrum_scan_panel.spectrum_scanner.scan_last_plot(win.waterfall_plot_data)
+                            
+                            # 应用堆叠偏移
+                            if ss.stack_offset > 0:
+                                self.spectrum_scan_panel.spectrum_scanner.set_stack_offset(ss.stack_offset)
+                            
+                            # 应用自定义偏移
+                            if ss.individual_offsets:
+                                self.spectrum_scan_panel.spectrum_scanner.apply_custom_offsets(ss.individual_offsets)
+                            
+                            # 重新绘制所有谱线（应用偏移）
+                            # 注意：不清空 axes，而是更新现有线条的 Y 数据
+                            # 但为了简化，我们重新绘制（因为需要应用偏移）
+                            ax.cla()  # 清除当前绘图
+                            
+                            # 重新绘制所有谱线（带偏移）
+                            for spec_data in scanned:
+                                spec_y = spec_data['y'] + spec_data.get('offset', 0.0)
+                                
+                                # 重新绘制阴影
+                                if spec_data.get('shadow_upper') is not None and spec_data.get('shadow_lower') is not None:
+                                    shadow_upper = spec_data['shadow_upper'] + spec_data.get('offset', 0.0)
+                                    shadow_lower = spec_data['shadow_lower'] + spec_data.get('offset', 0.0)
+                                    shadow_label = spec_data.get('shadow_label')
+                                    if not shadow_label:
+                                        # 尝试从原始数据获取阴影标签
+                                        shadow_label = spec_data.get('label', '') + ' ± Std'
+                                    ax.fill_between(spec_data['x'], shadow_lower, shadow_upper,
+                                                   color=spec_data.get('shadow_color', spec_data['color']),
+                                                   alpha=spec_data.get('shadow_alpha', 0.25),
+                                                   label=shadow_label)
+                                
+                                # 重新绘制线条
+                                if spec_data.get('type', 'line') == 'line':
+                                    ax.plot(spec_data['x'], spec_y, label=spec_data['label'],
+                                           color=spec_data['color'], linewidth=spec_data.get('linewidth', 1.2),
+                                           linestyle=spec_data.get('linestyle', '-'))
+                                else:
+                                    ax.plot(spec_data['x'], spec_y, label=spec_data['label'],
+                                           color=spec_data['color'], marker='.', linestyle='',
+                                           markersize=spec_data.get('linewidth', 1.2) * 3)
+                                
+                                # 重新应用峰值检测
+                                if hasattr(self, 'peak_check') and self.peak_check.isChecked():
+                                    try:
+                                        from src.core.peak_detection_helper import detect_and_plot_peaks
+                                        peak_params = self._get_peak_detection_params()
+                                        detect_and_plot_peaks(ax, spec_data['x'], spec_y, spec_y, peak_params, color=spec_data['color'])
+                                    except Exception as e:
+                                        print(f"峰值检测失败: {e}")
+                            
+                            # 重新应用样式设置（因为 ax.cla() 清空了所有设置）
+                            # 这部分会在后面的样式修饰代码中重新应用
+                except Exception as e:
+                    print(f"谱线扫描应用失败: {e}")
+                    import traceback
+                    traceback.print_exc()
 
             # 7. 样式修饰 - 使用主菜单的出版样式参数
             # 设置字体
@@ -6138,11 +5612,23 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 ax.set_ylabel(ylabel, fontsize=ylabel_fontsize, 
                             labelpad=ylabel_pad, fontfamily=current_font)
             
-            # 使用GUI中的标题控制参数
-            if self.gradient_title_show_check.isChecked():
-                gradient_title_text = self.gradient_title_input.text().strip() or "Concentration Gradient (Group Averages)"
-                ax.set_title(gradient_title_text, fontsize=self.gradient_title_font_spin.value(), 
-                           pad=self.gradient_title_pad_spin.value(), fontfamily=current_font)
+            # 使用GUI中的标题控制参数（确保控件存在）
+            if hasattr(self, 'gradient_title_show_check') and self.gradient_title_show_check and self.gradient_title_show_check.isChecked():
+                gradient_title_text = ""
+                if hasattr(self, 'gradient_title_input') and self.gradient_title_input:
+                    gradient_title_text = self.gradient_title_input.text().strip()
+                if not gradient_title_text:
+                    gradient_title_text = "Concentration Gradient (Group Averages)"
+                
+                fontsize = 16
+                if hasattr(self, 'gradient_title_font_spin') and self.gradient_title_font_spin:
+                    fontsize = self.gradient_title_font_spin.value()
+                
+                pad = 10.0
+                if hasattr(self, 'gradient_title_pad_spin') and self.gradient_title_pad_spin:
+                    pad = self.gradient_title_pad_spin.value()
+                
+                ax.set_title(gradient_title_text, fontsize=fontsize, pad=pad, fontfamily=current_font)
             
             # Ticks 样式（使用主菜单的样式参数）
             style_params = self._get_current_style_params()
@@ -6247,10 +5733,519 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 win.show()
             else:
                 win.raise_()  # 将窗口置于最前
+            
+            # 标记项目有未保存的更改
+            self._mark_project_changed()
 
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
-            traceback.print_exc()
+            import traceback as tb
+            tb.print_exc()
+    
+    def _setup_menu_bar(self):
+        """设置菜单栏"""
+        # === 项目菜单 ===
+        project_menu = self.menu_bar.addMenu("项目")
+        
+        # 新建项目
+        new_project_action = project_menu.addAction("📄 新建项目")
+        new_project_action.setShortcut("Ctrl+N")
+        new_project_action.triggered.connect(self.new_project)
+        
+        # 打开项目
+        open_project_action = project_menu.addAction("📂 打开项目")
+        open_project_action.setShortcut("Ctrl+O")
+        open_project_action.triggered.connect(self.open_project)
+        
+        project_menu.addSeparator()
+        
+        # 保存项目（手动保存）
+        save_action = project_menu.addAction("💾 保存项目")
+        save_action.setShortcut("Ctrl+S")
+        save_action.triggered.connect(self.save_project)
+        
+        # 另存为
+        save_as_action = project_menu.addAction("💾 另存为...")
+        save_as_action.setShortcut("Ctrl+Shift+S")
+        save_as_action.triggered.connect(self.save_project_as)
+        
+        # 自动保存开关
+        self.auto_save_action = project_menu.addAction("自动保存")
+        self.auto_save_action.setCheckable(True)
+        self.auto_save_action.setChecked(False)  # 默认关闭
+        self.auto_save_action.triggered.connect(self._toggle_auto_save)
+        
+        project_menu.addSeparator()
+        
+        # 导出预处理后的数据
+        export_data_action = project_menu.addAction("📤 导出预处理后数据")
+        export_data_action.triggered.connect(self.export_processed_data)
+        
+        # 导出项目配置
+        export_config_action = project_menu.addAction("📋 导出项目配置")
+        export_config_action.triggered.connect(self.export_project_config)
+        
+        project_menu.addSeparator()
+        
+        # 项目管理
+        project_manager_action = project_menu.addAction("📁 项目管理...")
+        project_manager_action.triggered.connect(self.open_project_manager)
+        
+        # === 工具菜单 ===
+        tools_menu = self.menu_bar.addMenu("工具")
+        
+        # 批量绘图
+        batch_plot_action = tools_menu.addAction("📊 批量绘图")
+        batch_plot_action.triggered.connect(self.open_batch_plot_window)
+        
+        # 样式与匹配窗口
+        style_matching_action = tools_menu.addAction("🎨 样式与匹配")
+        style_matching_action.triggered.connect(self.open_style_matching_window)
+        
+        # 2D-COS分析
+        cos_2d_action = tools_menu.addAction("📈 2D-COS分析")
+        cos_2d_action.triggered.connect(self.run_2d_cos_analysis)
+        
+        tools_menu.addSeparator()
+        
+        # 清除缓存
+        clear_cache_action = tools_menu.addAction("🗑️ 清除缓存")
+        clear_cache_action.triggered.connect(self.clear_cache)
+        
+        # 重置设置
+        reset_settings_action = tools_menu.addAction("🔄 重置设置")
+        reset_settings_action.triggered.connect(self.reset_settings)
+        
+        # === 帮助菜单 ===
+        help_menu = self.menu_bar.addMenu("帮助")
+        
+        # 使用说明
+        user_guide_action = help_menu.addAction("📖 使用说明")
+        user_guide_action.triggered.connect(self.show_user_guide)
+        
+        help_menu.addSeparator()
+        
+        # 联系方式
+        contact_action = help_menu.addAction("📞 联系方式")
+        contact_action.triggered.connect(self.show_contact_info)
+        
+        # 关于
+        about_action = help_menu.addAction("ℹ️ 关于")
+        about_action.triggered.connect(self.show_about)
+    
+    # === 项目菜单相关方法 ===
+    def new_project(self):
+        """新建项目"""
+        # 如果有未保存的更改，提示保存
+        if self.project_unsaved_changes:
+            reply = QMessageBox.question(
+                self,
+                "未保存的更改",
+                "当前项目有未保存的更改，是否保存？",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save
+            )
+            if reply == QMessageBox.StandardButton.Save:
+                self.save_project()
+            elif reply == QMessageBox.StandardButton.Cancel:
+                return
+        
+        # 重置项目状态
+        self.current_project_path = None
+        self.project_unsaved_changes = False
+        self._mark_project_saved()
+        
+        # 清空数据
+        self.plot_windows.clear()
+        if self.nmf_window:
+            self.nmf_window.close()
+            self.nmf_window = None
+    
+    def open_project(self):
+        """打开项目"""
+        # 如果有未保存的更改，提示保存
+        if self.project_unsaved_changes:
+            reply = QMessageBox.question(
+                self,
+                "未保存的更改",
+                "当前项目有未保存的更改，是否保存？",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save
+            )
+            if reply == QMessageBox.StandardButton.Save:
+                self.save_project()
+            elif reply == QMessageBox.StandardButton.Cancel:
+                return
+        
+        # 选择项目文件
+        projects_dir = self.project_save_manager.projects_dir
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "打开项目",
+            str(projects_dir),
+            "项目文件 (*.json *.hdf5 *.h5);;所有文件 (*.*)"
+        )
+        
+        if file_path:
+            success = self.project_save_manager.load_project(file_path, self)
+            if success:
+                self.current_project_path = file_path
+                self._mark_project_saved()
+            else:
+                QMessageBox.critical(self, "错误", "加载项目失败，请查看控制台输出")
+    
+    def save_project_as(self):
+        """另存为项目"""
+        projects_dir = self.project_save_manager.projects_dir
+        default_name = f"项目_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        default_path = str(projects_dir / default_name)
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "另存为项目",
+            default_path,
+            "JSON 文件 (*.json);;HDF5 文件 (*.hdf5 *.h5);;所有文件 (*.*)"
+        )
+        
+        if file_path:
+            # 询问备注
+            note, ok = QInputDialog.getText(
+                self,
+                "项目备注",
+                "请输入项目备注（可选）:",
+                text=""
+            )
+            if not ok:
+                return
+            
+            success = self.project_save_manager.save_project(file_path, self, note=note if note else None)
+            if success:
+                self.current_project_path = file_path
+                self._mark_project_saved()
+                QMessageBox.information(self, "成功", f"项目已保存到:\n{file_path}")
+            else:
+                QMessageBox.critical(self, "错误", "保存项目失败，请查看控制台输出")
+    
+    def export_project_config(self):
+        """导出项目配置"""
+        if not self.current_project_path:
+            QMessageBox.warning(self, "警告", "当前没有打开的项目。")
+            return
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出项目配置",
+            "",
+            "JSON 文件 (*.json);;所有文件 (*.*)"
+        )
+        
+        if file_path:
+            try:
+                from src.core.plot_config_manager import PlotConfigManager
+                config_manager = PlotConfigManager()
+                config = config_manager.get_config()
+                
+                config_dict = config.to_dict()
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(config_dict, f, indent=2, ensure_ascii=False)
+                
+                QMessageBox.information(self, "成功", f"项目配置已导出到:\n{file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"导出配置失败: {str(e)}")
+    
+    # === 工具菜单相关方法 ===
+    def clear_cache(self):
+        """清除缓存"""
+        reply = QMessageBox.question(
+            self,
+            "确认",
+            "确定要清除所有缓存吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                if hasattr(self, 'cache_manager'):
+                    self.cache_manager.clear_all()
+                if hasattr(self, 'plot_data_cache'):
+                    self.plot_data_cache.clear()
+                QMessageBox.information(self, "成功", "缓存已清除。")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"清除缓存失败: {str(e)}")
+    
+    def reset_settings(self):
+        """重置设置"""
+        reply = QMessageBox.question(
+            self,
+            "确认",
+            "确定要重置所有设置吗？此操作不可撤销。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                self.settings.clear()
+                QMessageBox.information(self, "成功", "设置已重置，请重启应用程序以使更改生效。")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"重置设置失败: {str(e)}")
+    
+    # === 帮助菜单相关方法 ===
+    def show_user_guide(self):
+        """显示使用说明"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("使用说明")
+        dialog.setMinimumSize(800, 600)
+        layout = QVBoxLayout(dialog)
+        
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setStyleSheet("font-size: 11pt; line-height: 1.6;")
+        
+        guide_text = """
+<h2>光谱数据处理工作站使用说明</h2>
+
+<h3>1. 项目管理</h3>
+<p><b>新建项目：</b>创建新的项目，开始新的数据处理工作。</p>
+<p><b>打开项目：</b>加载之前保存的项目，恢复所有设置和数据。</p>
+<p><b>保存项目：</b>保存当前项目状态，包括所有参数设置、绘图窗口和数据。</p>
+<p><b>导出预处理后数据：</b>将经过预处理的光谱数据导出为CSV文件。</p>
+
+<h3>2. 数据读取</h3>
+<p>在"数据文件夹"中选择包含CSV或TXT文件的文件夹。程序会自动扫描并分组文件。</p>
+<p>可以设置跳过行数、物理截断范围等参数。</p>
+
+<h3>3. 数据预处理</h3>
+<p><b>Bose-Einstein校正：</b>校正温度相关的光谱强度。</p>
+<p><b>基线校正：</b>使用AsLS算法去除基线漂移。</p>
+<p><b>归一化：</b>支持最大值归一化、面积归一化和SNV归一化。</p>
+<p><b>平滑：</b>使用Savitzky-Golay滤波器平滑数据。</p>
+
+<h3>4. 绘图功能</h3>
+<p><b>运行绘图：</b>绘制分组后的光谱图，支持叠加显示和瀑布图模式。</p>
+<p><b>组间平均对比：</b>绘制组间平均值的瀑布图对比。</p>
+<p><b>NMF解混分析：</b>使用非负矩阵分解进行光谱解混。</p>
+
+<h3>5. 样式设置</h3>
+<p>在"样式与匹配"窗口中可以设置：</p>
+<ul>
+    <li>字体、字号、颜色</li>
+    <li>坐标轴标签和刻度</li>
+    <li>图例位置和样式</li>
+    <li>边框和网格</li>
+</ul>
+
+<h3>6. 峰值检测与匹配</h3>
+<p>可以自动检测光谱峰值，并与RRUFF数据库进行匹配。</p>
+<p>支持手动调整峰值位置和匹配结果。</p>
+
+<h3>7. 快捷键</h3>
+<ul>
+    <li>Ctrl+N: 新建项目</li>
+    <li>Ctrl+O: 打开项目</li>
+    <li>Ctrl+S: 保存项目</li>
+    <li>Ctrl+Shift+S: 另存为</li>
+</ul>
+
+<h3>8. 提示</h3>
+<p>• 项目会自动标记未保存的更改，关闭前会提示保存。</p>
+<p>• 可以开启自动保存功能，定期保存项目状态。</p>
+<p>• 所有绘图窗口的位置和大小都会被保存和恢复。</p>
+        """
+        
+        text_edit.setHtml(guide_text)
+        layout.addWidget(text_edit)
+        
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.exec()
+    
+    def show_contact_info(self):
+        """显示联系方式"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("联系方式")
+        dialog.setMinimumSize(400, 200)
+        layout = QVBoxLayout(dialog)
+        
+        info_text = """
+<h2>联系方式</h2>
+<p><b>电话：</b>18379361169</p>
+<p><b>邮箱：</b>zhouzm7113@mail.ustc.edu.cn</p>
+<p><b>QQ：</b>810770504</p>
+<p style="margin-top: 20px;">如有问题或建议，欢迎联系！</p>
+        """
+        
+        label = QLabel()
+        label.setText(info_text)
+        label.setStyleSheet("font-size: 12pt; padding: 20px;")
+        layout.addWidget(label)
+        
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.exec()
+    
+    def show_about(self):
+        """显示关于信息"""
+        QMessageBox.about(
+            self,
+            "关于",
+            "<h2>光谱数据处理工作站</h2>"
+            "<p><b>版本：</b>Pro版</p>"
+            "<p><b>开发组：</b>GTzhou组</p>"
+            "<p>专业的光谱数据处理和分析工具</p>"
+            "<p>支持拉曼光谱数据的预处理、分析和可视化</p>"
+        )
+    
+    def open_project_manager(self):
+        """打开项目管理对话框"""
+        from src.ui.windows.project_manager_dialog import ProjectManagerDialog
+        dialog = ProjectManagerDialog(self, self.project_save_manager)
+        if dialog.exec():
+            project_path = dialog.get_selected_project_path()
+            if project_path:
+                success = self.project_save_manager.load_project(project_path, self)
+                if success:
+                    # 移除成功提示框，直接加载
+                    self.current_project_path = project_path
+                    self._mark_project_saved()
+                else:
+                    QMessageBox.critical(self, "错误", "加载项目失败，请查看控制台输出")
+    
+    # --- 项目存档功能 ---
+    def save_project(self):
+        """保存项目（手动保存）"""
+        # 如果有当前项目路径，直接保存；否则弹出对话框
+        if self.current_project_path:
+                success = self.project_save_manager.save_project(self.current_project_path, self, note=None)
+                if success:
+                    self.project_unsaved_changes = False
+                    self._mark_project_saved()  # 更新窗口标题
+                    # 移除成功提示框，直接保存
+                else:
+                    QMessageBox.critical(self, "错误", "保存项目失败，请查看控制台输出")
+        else:
+            # 使用项目目录作为默认路径
+            projects_dir = self.project_save_manager.projects_dir
+            default_name = f"项目_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            default_path = str(projects_dir / default_name)
+            
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "保存项目",
+                default_path,
+                "JSON 文件 (*.json);;HDF5 文件 (*.hdf5 *.h5);;所有文件 (*.*)"
+            )
+            
+            if file_path:
+                # 询问备注
+                note, ok = QInputDialog.getText(
+                    self,
+                    "项目备注",
+                    "请输入项目备注（可选）:",
+                    text=""
+                )
+                
+                if ok:
+                    success = self.project_save_manager.save_project(file_path, self, note=note if note else None)
+                    if success:
+                        self.current_project_path = file_path
+                        self.project_unsaved_changes = False
+                        QMessageBox.information(self, "成功", f"项目已保存到:\n{file_path}")
+                    else:
+                        QMessageBox.critical(self, "错误", "保存项目失败，请查看控制台输出")
+    
+    def save_project_with_info(self, file_path: str, note: str = "") -> bool:
+        """使用指定路径和备注保存项目"""
+        success = self.project_save_manager.save_project(file_path, self, note=note if note else None)
+        if success:
+            self.current_project_path = file_path
+            self.project_unsaved_changes = False
+            self._mark_project_saved()  # 更新窗口标题
+        return success
+    
+    def save_project_to_path(self, file_path: str, note: str = "") -> bool:
+        """保存项目到指定路径（别名方法）"""
+        return self.save_project_with_info(file_path, note)
+    
+    def load_project(self):
+        """加载项目"""
+        # 如果有未保存的更改，先提示保存
+        if self.project_unsaved_changes:
+            reply = QMessageBox.question(
+                self,
+                "未保存的更改",
+                "当前项目有未保存的更改，是否先保存？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.save_project()
+            elif reply == QMessageBox.StandardButton.Cancel:
+                return
+        
+        # 使用项目目录作为默认路径
+        projects_dir = self.project_save_manager.projects_dir
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "加载项目",
+            str(projects_dir),
+            "JSON 文件 (*.json);;HDF5 文件 (*.hdf5 *.h5);;所有文件 (*.*)"
+        )
+        
+        if file_path:
+            success = self.project_save_manager.load_project(file_path, self)
+            if success:
+                self.current_project_path = file_path
+                self.project_unsaved_changes = False
+                self._mark_project_saved()  # 更新窗口标题
+                QMessageBox.information(self, "成功", f"项目已从以下文件加载:\n{file_path}\n\n请重新运行绘图以查看结果。")
+            else:
+                QMessageBox.critical(self, "错误", "加载项目失败，请查看控制台输出")
+    
+    def _toggle_auto_save(self, checked):
+        """切换自动保存"""
+        if checked:
+            # 启动自动保存定时器（每5分钟自动保存一次）
+            from PyQt6.QtCore import QTimer
+            if self.auto_save_timer is None:
+                self.auto_save_timer = QTimer(self)
+                self.auto_save_timer.timeout.connect(self._auto_save_project)
+            self.auto_save_timer.start(5 * 60 * 1000)  # 5分钟 = 300000毫秒
+            QMessageBox.information(self, "自动保存", "自动保存已启用，每5分钟自动保存一次")
+        else:
+            # 停止自动保存
+            if self.auto_save_timer:
+                self.auto_save_timer.stop()
+            QMessageBox.information(self, "自动保存", "自动保存已禁用")
+    
+    def _auto_save_project(self):
+        """自动保存项目"""
+        if self.current_project_path:
+            success = self.project_save_manager.save_project(self.current_project_path, self, note=None)
+            if success:
+                self._mark_project_saved()  # 更新窗口标题
+                print(f"[自动保存] 项目已自动保存: {self.current_project_path}")
+            else:
+                print(f"[自动保存] 自动保存失败: {self.current_project_path}")
+        else:
+            # 如果没有当前项目路径，尝试使用默认名称保存
+            projects_dir = self.project_save_manager.projects_dir
+            default_name = f"自动保存_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            default_path = str(projects_dir / default_name)
+            success = self.project_save_manager.save_project(default_path, self, note="自动保存")
+            if success:
+                self.current_project_path = default_path
+                self.project_unsaved_changes = False
+                self._mark_project_saved()  # 更新窗口标题
+                print(f"[自动保存] 项目已自动保存到新文件: {default_path}")
     
     # --- 核心：导出数据 (保留原功能) ---
     def export_processed_data(self):
@@ -6453,7 +6448,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         self._safe_set_widget_value('nmf_svd_denoise_check', lambda w: w.setChecked(self.settings.value("nmf_svd_denoise_enabled", False, type=bool)))
         self._safe_set_widget_value('nmf_svd_components_spin', lambda w: w.setValue(int(self.settings.value("nmf_svd_components", 5))))
         self._safe_set_widget_value('nmf_comp_spin', lambda w: w.setValue(int(self.settings.value("nmf_comp", 2))))
-        self._safe_set_widget_value('nmf_max_iter', lambda w: w.setValue(int(self.settings.value("nmf_max_iter", 200))))
+        self._safe_set_widget_value('nmf_max_iter', lambda w: w.setValue(int(self.settings.value("nmf_max_iter", 500))))
+        self._safe_set_widget_value('nmf_tol', lambda w: w.setValue(float(self.settings.value("nmf_tol", 1e-4))))
         self._safe_set_widget_value('nmf_top_title_input', lambda w: w.setText(self.settings.value("nmf_top_title", "Extracted Spectra (Components)")))
         self._safe_set_widget_value('nmf_bottom_title_input', lambda w: w.setText(self.settings.value("nmf_bottom_title", "Concentration Weights (vs. Sample)")))
         self._safe_set_widget_value('nmf_top_title_font_spin', lambda w: w.setValue(int(self.settings.value("nmf_top_title_fontsize", 16))))
@@ -6501,6 +6497,41 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
 
 
     def closeEvent(self, event):
+        """窗口关闭事件"""
+        # 如果有未保存的更改，提示用户保存
+        if self.project_unsaved_changes:
+            reply = QMessageBox.question(
+                self,
+                "未保存的更改",
+                "当前项目有未保存的更改，是否保存？",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save
+            )
+            
+            if reply == QMessageBox.StandardButton.Save:
+                # 如果有当前项目路径，直接保存；否则弹出保存对话框
+                if self.current_project_path:
+                    success = self.project_save_manager.save_project(self.current_project_path, self, note=None)
+                    if not success:
+                        QMessageBox.critical(self, "错误", "保存项目失败，请查看控制台输出")
+                        event.ignore()  # 保存失败，取消关闭
+                        return
+                    self.project_unsaved_changes = False
+                else:
+                    # 弹出保存对话框
+                    self.save_project()
+                    # 如果用户取消了保存对话框，取消关闭
+                    if self.project_unsaved_changes:
+                        event.ignore()
+                        return
+            elif reply == QMessageBox.StandardButton.Cancel:
+                event.ignore()  # 取消关闭
+                return
+        
+        # 继续原有的关闭逻辑
+        self._closeEvent_original(event)
+    
+    def _closeEvent_original(self, event):
         # 退出时保存所有参数（使用安全方法避免C++对象删除错误）
         
         # 1. 通用和预处理参数
@@ -6671,7 +6702,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         self.settings.setValue("nmf_svd_denoise_enabled", self._safe_get_widget_value('nmf_svd_denoise_check', lambda w: w.isChecked(), False))
         self.settings.setValue("nmf_svd_components", self._safe_get_widget_value('nmf_svd_components_spin', lambda w: w.value(), 5))
         self.settings.setValue("nmf_comp", self._safe_get_widget_value('nmf_comp_spin', lambda w: w.value(), 3))
-        self.settings.setValue("nmf_max_iter", self._safe_get_widget_value('nmf_max_iter', lambda w: w.value(), 200))
+        self.settings.setValue("nmf_max_iter", self._safe_get_widget_value('nmf_max_iter', lambda w: w.value(), 500))
+        self.settings.setValue("nmf_tol", self._safe_get_widget_value('nmf_tol', lambda w: w.value(), 1e-4))
         # 保存NMF目标组分索引（如果窗口存在，从窗口获取最新值）
         if hasattr(self, 'nmf_window') and self.nmf_window is not None:
             try:
@@ -7051,10 +7083,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         elif transform_mode == '平方根变换 (Sqrt)':
             y_proc = DataPreProcessor.apply_sqrt_transform(y_proc, offset=self.global_sqrt_offset_spin.value())
         
-        # 二次导数
-        if self.derivative_check.isChecked():
-            d1 = np.gradient(y_proc, x)
-            y_proc = np.gradient(d1, x)
+        # 注意：二次导数已在预处理流程中应用，不再需要单独的控件
+        # 如果需要二次导数，应该在预处理参数中设置
         
         # 整体Y轴偏移
         if hasattr(self, 'global_y_offset_spin'):

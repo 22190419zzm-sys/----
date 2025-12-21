@@ -557,12 +557,9 @@ class NMFResultWindow(QDialog):
         # 保存子图1的绘图数据
         self.subplot_plot_data[1] = subplot1_plot_data
         
-        # 谱线扫描（子图1）- 优先使用子图配置，否则使用全局配置
+        # 谱线扫描（子图1）- 使用全局配置
         scan_config1 = None
-        if subplot1_controller:
-            config1 = subplot1_controller.get_style_config()
-            scan_config1 = config1.spectrum_scan
-        elif global_config:
+        if global_config:
             scan_config1 = global_config.spectrum_scan
         
         if scan_config1 and scan_config1.enabled and len(subplot1_plot_data) > 1:
@@ -631,7 +628,20 @@ class NMFResultWindow(QDialog):
         # 应用多子图样式控制（优先使用子图独立样式，否则使用全局样式）
         from src.core.style_applier import apply_publication_style_to_axes
         
-        # 子图0样式
+        # 子图0样式 - 尝试从样式匹配窗口获取控制器
+        subplot0_controller = None
+        try:
+            if self.parent():
+                parent = self.parent()
+                if hasattr(parent, '_style_matching_window') and parent._style_matching_window:
+                    style_window = parent._style_matching_window
+                    if hasattr(style_window, 'get_subplot_controller'):
+                        subplot0_controller = style_window.get_subplot_controller("NMFResultWindow", 0)
+        except Exception as e:
+            # 如果获取控制器失败，使用全局配置
+            print(f"获取子图控制器失败: {e}")
+            subplot0_controller = None
+        
         if subplot0_controller:
             subplot0_controller.apply_style_to_axes(ax1)
         elif global_config:
@@ -641,10 +651,8 @@ class NMFResultWindow(QDialog):
             # 最后回退
             apply_publication_style_to_axes(ax1)
         
-        # 子图1样式
-        if subplot1_controller:
-            subplot1_controller.apply_style_to_axes(ax2)
-        elif global_config:
+        # 子图1样式 - 使用全局配置
+        if global_config:
             # 使用全局样式
             apply_publication_style_to_axes(ax2, global_config)
         else:
@@ -695,10 +703,9 @@ class NMFResultWindow(QDialog):
                           ncol=legend_ncol, columnspacing=legend_columnspacing,
                           labelspacing=legend_labelspacing, handlelength=legend_handlelength)
         
-        # 子图1图例
-        if subplot1_controller:
-            config1 = subplot1_controller.get_style_config()
-            ps1 = config1.publication_style
+        # 子图1图例 - 使用全局配置
+        if global_config:
+            ps1 = global_config.publication_style
             if ps1.show_legend:
                 from matplotlib.font_manager import FontProperties
                 legend_font = FontProperties()

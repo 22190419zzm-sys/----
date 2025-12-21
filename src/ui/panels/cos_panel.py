@@ -42,9 +42,13 @@ class COSPanelMixin:
                 QMessageBox.warning(self, "错误", "请先选择数据文件夹")
                 return
 
-            # 物理截断值
-            x_min_phys = self._parse_optional_float(self.x_min_phys_input.text())
-            x_max_phys = self._parse_optional_float(self.x_max_phys_input.text())
+            # 物理截断值（确保控件存在）
+            x_min_phys = None
+            x_max_phys = None
+            if hasattr(self, 'x_min_phys_input') and self.x_min_phys_input:
+                x_min_phys = self._parse_optional_float(self.x_min_phys_input.text())
+            if hasattr(self, 'x_max_phys_input') and self.x_max_phys_input:
+                x_max_phys = self._parse_optional_float(self.x_max_phys_input.text())
 
             # 读取基础参数
             skip = self.skip_rows_spin.value()

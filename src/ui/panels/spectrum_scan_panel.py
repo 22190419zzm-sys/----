@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QHBoxLayout,
     QDoubleSpinBox, QSpinBox, QCheckBox, QPushButton,
     QLabel, QListWidget, QListWidgetItem, QMessageBox,
-    QTableWidget, QTableWidgetItem, QHeaderView
+    QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit
 )
 from PyQt6.QtCore import pyqtSignal
 
@@ -52,12 +52,38 @@ class SpectrumScanPanel(QWidget):
         scan_layout.addWidget(self.scan_status_label)
         
         # 扫描到的谱线列表（给更多空间）
-        scan_layout.addWidget(QLabel("扫描到的谱线:"))
+        scan_layout.addWidget(QLabel("扫描到的谱线/图例:"))
         self.spectrum_list = QListWidget()
         self.spectrum_list.setMinimumHeight(150)
         self.spectrum_list.setMaximumHeight(250)
-        self.spectrum_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.spectrum_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.spectrum_list.itemSelectionChanged.connect(self._on_spectrum_selected)
         scan_layout.addWidget(self.spectrum_list)
+        
+        # 选中谱线的编辑控件
+        edit_group = CollapsibleGroupBox("编辑选中谱线", is_expanded=False)
+        edit_layout = QFormLayout()
+        
+        # 图例名称编辑
+        self.legend_edit_input = QLineEdit()
+        self.legend_edit_input.setPlaceholderText("图例名称")
+        self.legend_edit_input.textChanged.connect(self._on_legend_changed)
+        edit_layout.addRow("图例名称:", self.legend_edit_input)
+        
+        # 颜色选择
+        from PyQt6.QtWidgets import QColorDialog
+        self.color_edit_input = QLineEdit()
+        self.color_edit_input.setPlaceholderText("例如: #FF0000 或 red")
+        self.color_edit_input.textChanged.connect(self._on_color_changed)
+        self.color_picker_btn = QPushButton("选择颜色")
+        self.color_picker_btn.clicked.connect(self._pick_color)
+        color_layout = QHBoxLayout()
+        color_layout.addWidget(self.color_edit_input)
+        color_layout.addWidget(self.color_picker_btn)
+        edit_layout.addRow("颜色:", color_layout)
+        
+        edit_group.setContentLayout(edit_layout)
+        scan_layout.addWidget(edit_group)
         
         # 堆叠偏移设置（紧凑布局）
         stack_layout = QFormLayout()
@@ -144,6 +170,11 @@ class SpectrumScanPanel(QWidget):
         """配置改变时"""
         self.save_config()
         self.config_changed.emit()
+        # 通知主窗口更新绘图（如果颜色或图例改变）
+        if self.parent():
+            parent = self.parent()
+            if hasattr(parent, '_on_style_param_changed'):
+                parent._on_style_param_changed()
     
     def _on_stack_offset_changed(self):
         """堆叠偏移改变时"""
@@ -341,4 +372,84 @@ class SpectrumScanPanel(QWidget):
         """获取当前配置"""
         self.save_config()
         return self.config_manager.get_config()
+    
+    def _on_spectrum_selected(self):
+        """当选中谱线时，更新编辑控件"""
+        selected_items = self.spectrum_list.selectedItems()
+        if not selected_items:
+            # 清空编辑控件
+            self.legend_edit_input.setText("")
+            self.color_edit_input.setText("")
+            return
+        
+        # 获取选中的谱线索引
+        item = selected_items[0]
+        idx = item.data(256)  # 存储的索引
+        
+        # 从扫描器中获取谱线信息
+        if self.spectrum_scanner.scanned_spectra and idx < len(self.spectrum_scanner.scanned_spectra):
+            spec = self.spectrum_scanner.scanned_spectra[idx]
+            label = spec.get('label', f'Spectrum {idx}')
+            color = spec.get('color', '')
+            
+            # 更新编辑控件
+            self.legend_edit_input.setText(label)
+            if color:
+                self.color_edit_input.setText(color)
+            else:
+                self.color_edit_input.setText("")
+    
+    def _on_legend_changed(self, text):
+        """图例名称改变时"""
+        selected_items = self.spectrum_list.selectedItems()
+        if not selected_items:
+            return
+        
+        # 获取选中的谱线索引
+        item = selected_items[0]
+        idx = item.data(256)
+        
+        # 更新扫描器中的标签
+        if self.spectrum_scanner.scanned_spectra and idx < len(self.spectrum_scanner.scanned_spectra):
+            self.spectrum_scanner.scanned_spectra[idx]['label'] = text
+            # 更新列表项显示
+            item.setText(f"{idx}: {text}")
+            # 更新偏移表格
+            self._update_offset_table(self.spectrum_scanner.scanned_spectra)
+            # 触发配置更新
+            self._on_config_changed()
+    
+    def _on_color_changed(self, text):
+        """颜色改变时"""
+        selected_items = self.spectrum_list.selectedItems()
+        if not selected_items:
+            return
+        
+        # 获取选中的谱线索引
+        item = selected_items[0]
+        idx = item.data(256)
+        
+        # 更新扫描器中的颜色
+        if self.spectrum_scanner.scanned_spectra and idx < len(self.spectrum_scanner.scanned_spectra):
+            self.spectrum_scanner.scanned_spectra[idx]['color'] = text if text else None
+            # 触发配置更新
+            self._on_config_changed()
+    
+    def _pick_color(self):
+        """打开颜色选择对话框"""
+        from PyQt6.QtWidgets import QColorDialog
+        from PyQt6.QtGui import QColor
+        
+        # 获取当前颜色
+        current_color = self.color_edit_input.text()
+        initial_color = QColor(current_color) if current_color else QColor(255, 0, 0)
+        
+        # 打开颜色选择对话框
+        color = QColorDialog.getColor(initial_color, self, "选择颜色")
+        if color.isValid():
+            # 转换为字符串格式（优先使用十六进制）
+            color_str = color.name()
+            self.color_edit_input.setText(color_str)
+            # 触发颜色改变事件
+            self._on_color_changed(color_str)
 

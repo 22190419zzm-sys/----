@@ -45,11 +45,20 @@ class NMFPanelMixin:
         self.nmf_comp_spin.setValue(2)
         
         self.nmf_max_iter = QSpinBox()
-        self.nmf_max_iter.setRange(-999999999, 999999999)
-        self.nmf_max_iter.setValue(200)
+        self.nmf_max_iter.setRange(1, 999999999)
+        self.nmf_max_iter.setValue(500)  # 增加默认迭代次数，减少收敛警告
+        
+        # 添加收敛容差参数
+        self.nmf_tol = QDoubleSpinBox()
+        self.nmf_tol.setRange(1e-10, 1.0)
+        self.nmf_tol.setDecimals(10)
+        self.nmf_tol.setValue(1e-4)  # 默认容差
+        self.nmf_tol.setSingleStep(1e-4)
+        self.nmf_tol.setToolTip("收敛容差：当损失函数的变化小于此值时停止迭代。值越小收敛越精确但可能需要更多迭代。")
         
         nmf_layout.addRow("组件数量 (k):", self.nmf_comp_spin)
         nmf_layout.addRow("最大迭代次数:", self.nmf_max_iter)
+        nmf_layout.addRow("收敛容差 (tol):", self.nmf_tol)
         
         # --- 在 NMF Group 中新增预滤波控制 ---
         # 预滤波开关

@@ -36,16 +36,7 @@ class PublicationStylePanel(QWidget):
         pub_layout = QFormLayout()
         
         # Figure/DPI
-        self.fig_width_spin = QDoubleSpinBox()
-        self.fig_width_spin.setRange(-999999999.0, 999999999.0)
-        self.fig_width_spin.setDecimals(15)
-        self.fig_width_spin.setValue(10.0)
-        
-        self.fig_height_spin = QDoubleSpinBox()
-        self.fig_height_spin.setRange(-999999999.0, 999999999.0)
-        self.fig_height_spin.setDecimals(15)
-        self.fig_height_spin.setValue(6.0)
-        
+        # 注意：fig_width 和 fig_height 已删除（没有实际作用）
         self.fig_dpi_spin = QSpinBox()
         self.fig_dpi_spin.setRange(-999999999, 999999999)
         self.fig_dpi_spin.setValue(300)
@@ -68,27 +59,15 @@ class PublicationStylePanel(QWidget):
         preset_layout.addWidget(btn_manage_presets)
         pub_layout.addRow("风格预设:", preset_layout)
         
-        pub_layout.addRow("图尺寸 W/H:", self._create_h_layout([self.fig_width_spin, self.fig_height_spin]))
+        # 注意：图尺寸W/H已删除（没有实际作用）
+        # 注意：字体大小（轴/刻度/图例）已删除（下面有实现方法）
         pub_layout.addRow("DPI / 纵横比:", self._create_h_layout([self.fig_dpi_spin, self.aspect_ratio_spin]))
         
         # Font
         self.font_family_combo = QComboBox()
         self.font_family_combo.addItems(['Times New Roman', 'Arial', 'SimHei'])
         
-        self.axis_title_font_spin = QSpinBox()
-        self.axis_title_font_spin.setRange(-999999999, 999999999)
-        self.axis_title_font_spin.setValue(20)
-        
-        self.tick_label_font_spin = QSpinBox()
-        self.tick_label_font_spin.setRange(-999999999, 999999999)
-        self.tick_label_font_spin.setValue(16)
-        
-        self.legend_font_spin = QSpinBox()
-        self.legend_font_spin.setRange(-999999999, 999999999)
-        self.legend_font_spin.setValue(10)
-        
         pub_layout.addRow("字体家族:", self.font_family_combo)
-        pub_layout.addRow("字体大小 (轴/刻度/图例):", self._create_h_layout([self.axis_title_font_spin, self.tick_label_font_spin, self.legend_font_spin]))
         
         # Lines
         self.line_width_spin = QDoubleSpinBox()
@@ -117,15 +96,10 @@ class PublicationStylePanel(QWidget):
         self.tick_width_spin.setDecimals(15)
         self.tick_width_spin.setValue(1.0)
         
-        # 刻度显示控制（上下左右）
-        self.tick_top_check = QCheckBox("上", checked=True)
-        self.tick_bottom_check = QCheckBox("下", checked=True)
-        self.tick_left_check = QCheckBox("左", checked=True)
-        self.tick_right_check = QCheckBox("右", checked=True)
+        # 注意：刻度显示控制（上下左右）已删除（没用且不会自动更新）
         
         pub_layout.addRow("刻度方向 / 宽度:", self._create_h_layout([self.tick_direction_combo, self.tick_width_spin]))
         pub_layout.addRow("刻度长度 (大/小):", self._create_h_layout([self.tick_len_major_spin, self.tick_len_minor_spin]))
-        pub_layout.addRow("刻度显示 (上/下/左/右):", self._create_h_layout([self.tick_top_check, self.tick_bottom_check, self.tick_left_check, self.tick_right_check]))
         
         # Grid/Shadow
         self.show_grid_check = QCheckBox("显示网格")
@@ -303,23 +277,17 @@ class PublicationStylePanel(QWidget):
         ps = config.publication_style
         
         # 加载基本样式
-        self.fig_width_spin.setValue(ps.fig_width)
-        self.fig_height_spin.setValue(ps.fig_height)
+        # 注意：fig_width 和 fig_height 已删除（没有实际作用）
         self.fig_dpi_spin.setValue(ps.fig_dpi)
         self.aspect_ratio_spin.setValue(ps.aspect_ratio)
         self.font_family_combo.setCurrentText(ps.font_family)
-        self.axis_title_font_spin.setValue(ps.axis_title_fontsize)
-        self.tick_label_font_spin.setValue(ps.tick_label_fontsize)
-        self.legend_font_spin.setValue(ps.legend_fontsize)
+        # 注意：axis_title_fontsize 和 tick_label_fontsize 已删除（下面有实现方法）
         self.line_width_spin.setValue(ps.line_width)
         self.line_style_combo.setCurrentText(ps.line_style)
         self.tick_direction_combo.setCurrentText(ps.tick_direction)
         self.tick_len_major_spin.setValue(ps.tick_len_major)
         self.tick_len_minor_spin.setValue(ps.tick_len_minor)
-        self.tick_top_check.setChecked(ps.tick_top)
-        self.tick_bottom_check.setChecked(ps.tick_bottom)
-        self.tick_left_check.setChecked(ps.tick_left)
-        self.tick_right_check.setChecked(ps.tick_right)
+        # 注意：tick_top/bottom/left/right 已删除（没用且不会自动更新）
         self.tick_width_spin.setValue(ps.tick_width)
         self.show_grid_check.setChecked(ps.show_grid)
         self.grid_alpha_spin.setValue(ps.grid_alpha)
@@ -363,23 +331,17 @@ class PublicationStylePanel(QWidget):
         ps = config.publication_style
         
         # 保存基本样式
-        ps.fig_width = self.fig_width_spin.value()
-        ps.fig_height = self.fig_height_spin.value()
+        # 注意：fig_width 和 fig_height 已删除（没有实际作用）
         ps.fig_dpi = self.fig_dpi_spin.value()
         ps.aspect_ratio = self.aspect_ratio_spin.value()
         ps.font_family = self.font_family_combo.currentText()
-        ps.axis_title_fontsize = self.axis_title_font_spin.value()
-        ps.tick_label_fontsize = self.tick_label_font_spin.value()
-        ps.legend_fontsize = self.legend_font_spin.value()
+        # 注意：axis_title_fontsize 和 tick_label_fontsize 已删除（下面有实现方法）
         ps.line_width = self.line_width_spin.value()
         ps.line_style = self.line_style_combo.currentText()
         ps.tick_direction = self.tick_direction_combo.currentText()
         ps.tick_len_major = self.tick_len_major_spin.value()
         ps.tick_len_minor = self.tick_len_minor_spin.value()
-        ps.tick_top = self.tick_top_check.isChecked()
-        ps.tick_bottom = self.tick_bottom_check.isChecked()
-        ps.tick_left = self.tick_left_check.isChecked()
-        ps.tick_right = self.tick_right_check.isChecked()
+        # 注意：tick_top/bottom/left/right 已删除（没用且不会自动更新）
         ps.tick_width = self.tick_width_spin.value()
         ps.show_grid = self.show_grid_check.isChecked()
         ps.grid_alpha = self.grid_alpha_spin.value()
@@ -433,14 +395,12 @@ class PublicationStylePanel(QWidget):
             self.fig_dpi_spin.setValue(300)
             self.aspect_ratio_spin.setValue(0.6)
         elif preset_name == "Icarus 单栏":
-            self.fig_width_spin.setValue(3.4)
-            self.fig_height_spin.setValue(2.6)
+            # 注意：fig_width 和 fig_height 已删除（没有实际作用）
             self.fig_dpi_spin.setValue(300)
             self.aspect_ratio_spin.setValue(2.6 / 3.4)
             self.font_family_combo.setCurrentText("Times New Roman")
-            self.axis_title_font_spin.setValue(10)
-            self.tick_label_font_spin.setValue(8)
-            self.legend_font_spin.setValue(8)
+            # 注意：axis_title_font_spin 和 tick_label_font_spin 已删除（下面有实现方法）
+            self.legend_fontsize_spin.setValue(8)
             self.line_width_spin.setValue(1.0)
             self.tick_direction_combo.setCurrentText("in")
             self.tick_len_major_spin.setValue(6)
@@ -448,14 +408,12 @@ class PublicationStylePanel(QWidget):
             self.tick_width_spin.setValue(1.0)
             self.spine_width_spin.setValue(1.0)
         elif preset_name == "Icarus 双栏":
-            self.fig_width_spin.setValue(7.0)
-            self.fig_height_spin.setValue(5.0)
+            # 注意：fig_width 和 fig_height 已删除（没有实际作用）
             self.fig_dpi_spin.setValue(300)
             self.aspect_ratio_spin.setValue(5.0 / 7.0)
             self.font_family_combo.setCurrentText("Times New Roman")
-            self.axis_title_font_spin.setValue(12)
-            self.tick_label_font_spin.setValue(10)
-            self.legend_font_spin.setValue(10)
+            # 注意：axis_title_font_spin 和 tick_label_font_spin 已删除（下面有实现方法）
+            self.legend_fontsize_spin.setValue(10)
             self.line_width_spin.setValue(1.2)
             self.tick_direction_combo.setCurrentText("in")
             self.tick_len_major_spin.setValue(6)

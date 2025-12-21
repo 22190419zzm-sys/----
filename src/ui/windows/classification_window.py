@@ -4651,20 +4651,32 @@ class SpectraConfigDialog(QDialog):
             nmf_legend_names = {}
             # 首先从NMF组件重命名控件获取
             if hasattr(self, 'nmf_component_rename_widgets'):
-                for comp_label, rename_widget in self.nmf_component_rename_widgets.items():
-                    new_name = rename_widget.text().strip()
-                    if new_name:
-                        nmf_legend_names[comp_label] = new_name
+                try:
+                    for comp_label, rename_widget in list(self.nmf_component_rename_widgets.items()):
+                        try:
+                            new_name = rename_widget.text().strip()
+                            if new_name:
+                                nmf_legend_names[comp_label] = new_name
+                        except (RuntimeError, AttributeError):
+                            continue
+                except (RuntimeError, AttributeError):
+                    pass
             # 然后从主窗口的legend_rename_widgets获取（优先级更高）
             if hasattr(self, 'legend_rename_widgets'):
-                for key, widget in self.legend_rename_widgets.items():
-                    if hasattr(widget, 'text'):
-                        renamed = widget.text().strip()
-                        if renamed and key.startswith('NMF Component'):
-                            # 提取组件编号
-                            comp_num = key.replace('NMF Component ', '')
-                            comp_label = f"Component {comp_num}"
-                            nmf_legend_names[comp_label] = renamed
+                try:
+                    for key, widget in list(self.legend_rename_widgets.items()):
+                        try:
+                            if hasattr(widget, 'text'):
+                                renamed = widget.text().strip()
+                                if renamed and key.startswith('NMF Component'):
+                                    # 提取组件编号
+                                    comp_num = key.replace('NMF Component ', '')
+                                    comp_label = f"Component {comp_num}"
+                                    nmf_legend_names[comp_label] = renamed
+                        except (RuntimeError, AttributeError):
+                            continue
+                except (RuntimeError, AttributeError):
+                    pass
             
             # 为对照组数据添加独立Y轴参数（如果存在）
             for ctrl_data in control_data_for_plot:

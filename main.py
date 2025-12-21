@@ -208,6 +208,44 @@ def main():
     # 关闭启动画面
     splash.close()
     
+    # 显示项目选择对话框（强制选择新建或加载项目）
+    from src.ui.windows.startup_project_dialog import StartupProjectDialog
+    startup_dialog = StartupProjectDialog(window)
+    
+    if not startup_dialog.exec():
+        # 用户取消了对话框，退出程序
+        sys.exit(0)
+    
+    # 处理项目选择结果
+    selected_path = startup_dialog.get_selected_project_path()
+    new_project_info = startup_dialog.get_new_project_info()
+    
+    if new_project_info:
+        # 新建项目
+        project_path = new_project_info['path']
+        project_note = new_project_info.get('note', '')
+        # 保存新项目
+        success = window.save_project_with_info(project_path, project_note)
+        if success:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(window, "项目已创建", f"新项目 '{new_project_info['name']}' 已创建并保存")
+        else:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(window, "错误", "创建项目失败，请查看控制台输出")
+            sys.exit(1)
+    elif selected_path:
+        # 加载项目
+        success = window.project_save_manager.load_project(selected_path, window)
+        if success:
+            window.current_project_path = selected_path
+            window.project_unsaved_changes = False
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(window, "项目已加载", f"项目已从以下文件加载:\n{selected_path}\n\n请重新运行绘图以查看结果。")
+        else:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(window, "错误", "加载项目失败，请查看控制台输出")
+            sys.exit(1)
+    
     # 显示主窗口
     try:
         window.show()

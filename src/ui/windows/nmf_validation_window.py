@@ -807,11 +807,22 @@ class NMFFitValidationWindow(QDialog):
         rename_map = {}
         parent = self.parent()
         if parent and hasattr(parent, 'legend_rename_widgets'):
-            for key, widget in parent.legend_rename_widgets.items():
-                if hasattr(widget, 'text'):
-                    renamed = widget.text().strip()
-                    if renamed:
-                        rename_map[key] = renamed
+            try:
+                # 尝试使用主窗口的安全方法
+                if hasattr(parent, '_safe_get_legend_rename_map'):
+                    rename_map = parent._safe_get_legend_rename_map()
+                else:
+                    # 否则使用安全的手动方法
+                    for key, widget in list(parent.legend_rename_widgets.items()):
+                        try:
+                            if hasattr(widget, 'text'):
+                                renamed = widget.text().strip()
+                                if renamed:
+                                    rename_map[key] = renamed
+                        except (RuntimeError, AttributeError):
+                            continue
+            except (RuntimeError, AttributeError):
+                pass
         
         # 使用重命名后的图例名称（如果有）
         raw_label = rename_map.get('原始光谱', style_params['legend_raw_label'])
@@ -1010,11 +1021,22 @@ class NMFFitValidationWindow(QDialog):
         rename_map = {}
         parent = self.parent()
         if parent and hasattr(parent, 'legend_rename_widgets'):
-            for key, widget in parent.legend_rename_widgets.items():
-                if hasattr(widget, 'text'):
-                    renamed = widget.text().strip()
-                    if renamed:
-                        rename_map[key] = renamed
+            try:
+                # 尝试使用主窗口的安全方法
+                if hasattr(parent, '_safe_get_legend_rename_map'):
+                    rename_map = parent._safe_get_legend_rename_map()
+                else:
+                    # 否则使用安全的手动方法
+                    for key, widget in list(parent.legend_rename_widgets.items()):
+                        try:
+                            if hasattr(widget, 'text'):
+                                renamed = widget.text().strip()
+                                if renamed:
+                                    rename_map[key] = renamed
+                        except (RuntimeError, AttributeError):
+                            continue
+            except (RuntimeError, AttributeError):
+                pass
         
         # 使用重命名后的图例名称（如果有）
         raw_label = rename_map.get('原始光谱', style_params['legend_raw_label'])
