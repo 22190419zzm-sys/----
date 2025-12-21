@@ -96,10 +96,15 @@ class PublicationStylePanel(QWidget):
         self.tick_width_spin.setDecimals(15)
         self.tick_width_spin.setValue(1.0)
         
-        # 注意：刻度显示控制（上下左右）已删除（没用且不会自动更新）
+        # 刻度显示控制（上下左右）
+        self.tick_top_check = QCheckBox("上刻度", checked=True)
+        self.tick_bottom_check = QCheckBox("下刻度", checked=True)
+        self.tick_left_check = QCheckBox("左刻度", checked=True)
+        self.tick_right_check = QCheckBox("右刻度", checked=True)
         
         pub_layout.addRow("刻度方向 / 宽度:", self._create_h_layout([self.tick_direction_combo, self.tick_width_spin]))
         pub_layout.addRow("刻度长度 (大/小):", self._create_h_layout([self.tick_len_major_spin, self.tick_len_minor_spin]))
+        pub_layout.addRow("刻度显示 (上/下/左/右):", self._create_h_layout([self.tick_top_check, self.tick_bottom_check, self.tick_left_check, self.tick_right_check]))
         
         # Grid/Shadow
         self.show_grid_check = QCheckBox("显示网格")
@@ -228,7 +233,14 @@ class PublicationStylePanel(QWidget):
         self.show_y_values_check = QCheckBox("显示Y轴数值")
         self.show_y_values_check.setChecked(True)
         
+        # 坐标轴显示控制（下X轴、左Y轴、上X轴、右Y轴）
+        self.show_bottom_xaxis_check = QCheckBox("显示下X轴", checked=True)
+        self.show_left_yaxis_check = QCheckBox("显示左Y轴", checked=True)
+        self.show_top_xaxis_check = QCheckBox("显示上X轴", checked=False)
+        self.show_right_yaxis_check = QCheckBox("显示右Y轴", checked=False)
+        
         pub_layout.addRow("坐标轴控制:", self._create_h_layout([self.x_axis_invert_check, self.show_x_values_check, self.show_y_values_check]))
+        pub_layout.addRow("坐标轴显示 (下X/左Y/上X/右Y):", self._create_h_layout([self.show_bottom_xaxis_check, self.show_left_yaxis_check, self.show_top_xaxis_check, self.show_right_yaxis_check]))
         # ============================================================
         
         pub_style_group.setContentLayout(pub_layout)
@@ -287,7 +299,11 @@ class PublicationStylePanel(QWidget):
         self.tick_direction_combo.setCurrentText(ps.tick_direction)
         self.tick_len_major_spin.setValue(ps.tick_len_major)
         self.tick_len_minor_spin.setValue(ps.tick_len_minor)
-        # 注意：tick_top/bottom/left/right 已删除（没用且不会自动更新）
+        # 加载刻度显示控制
+        self.tick_top_check.setChecked(getattr(ps, 'tick_top', True))
+        self.tick_bottom_check.setChecked(getattr(ps, 'tick_bottom', True))
+        self.tick_left_check.setChecked(getattr(ps, 'tick_left', True))
+        self.tick_right_check.setChecked(getattr(ps, 'tick_right', True))
         self.tick_width_spin.setValue(ps.tick_width)
         self.show_grid_check.setChecked(ps.show_grid)
         self.grid_alpha_spin.setValue(ps.grid_alpha)
@@ -324,6 +340,10 @@ class PublicationStylePanel(QWidget):
         self.x_axis_invert_check.setChecked(ps.x_axis_invert)
         self.show_x_values_check.setChecked(ps.show_x_values)
         self.show_y_values_check.setChecked(ps.show_y_values)
+        self.show_bottom_xaxis_check.setChecked(getattr(ps, 'show_bottom_xaxis', True))
+        self.show_left_yaxis_check.setChecked(getattr(ps, 'show_left_yaxis', True))
+        self.show_top_xaxis_check.setChecked(getattr(ps, 'show_top_xaxis', False))
+        self.show_right_yaxis_check.setChecked(getattr(ps, 'show_right_yaxis', False))
     
     def save_config(self):
         """保存配置到配置管理器"""
@@ -341,7 +361,11 @@ class PublicationStylePanel(QWidget):
         ps.tick_direction = self.tick_direction_combo.currentText()
         ps.tick_len_major = self.tick_len_major_spin.value()
         ps.tick_len_minor = self.tick_len_minor_spin.value()
-        # 注意：tick_top/bottom/left/right 已删除（没用且不会自动更新）
+        # 保存刻度显示控制
+        ps.tick_top = self.tick_top_check.isChecked()
+        ps.tick_bottom = self.tick_bottom_check.isChecked()
+        ps.tick_left = self.tick_left_check.isChecked()
+        ps.tick_right = self.tick_right_check.isChecked()
         ps.tick_width = self.tick_width_spin.value()
         ps.show_grid = self.show_grid_check.isChecked()
         ps.grid_alpha = self.grid_alpha_spin.value()
@@ -378,6 +402,10 @@ class PublicationStylePanel(QWidget):
         ps.x_axis_invert = self.x_axis_invert_check.isChecked()
         ps.show_x_values = self.show_x_values_check.isChecked()
         ps.show_y_values = self.show_y_values_check.isChecked()
+        ps.show_bottom_xaxis = self.show_bottom_xaxis_check.isChecked()
+        ps.show_left_yaxis = self.show_left_yaxis_check.isChecked()
+        ps.show_top_xaxis = self.show_top_xaxis_check.isChecked()
+        ps.show_right_yaxis = self.show_right_yaxis_check.isChecked()
         
         self.config_manager.update_config(config)
     

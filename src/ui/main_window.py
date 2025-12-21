@@ -145,6 +145,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         self.main_layout = QVBoxLayout(self)
         # 减小整体垂直间距，让各个区域更加紧凑
         # 顶部边距设为0，移除菜单栏上方的空白，确保菜单栏紧贴窗口顶部
+        # 左右边距保持10px，确保GroupBox正常显示
         self.main_layout.setContentsMargins(10, 0, 10, 10)
         self.main_layout.setSpacing(0) 
         
@@ -274,6 +275,13 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         # 确保窗口置顶
         self.raise_()
         self.activateWindow()
+        
+        # 确保菜单栏在最上层且可点击（在窗口显示后执行）
+        if hasattr(self, 'menu_bar') and self.menu_bar:
+            self.menu_bar.raise_()
+            self.menu_bar.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+            # 强制更新菜单栏的z-order
+            self.menu_bar.update()
         
         # 如果有待恢复的项目数据状态，现在恢复它们
         if hasattr(self, '_pending_project_data_states') and self._pending_project_data_states:
@@ -1126,33 +1134,30 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             # 清空相关缓存
             if hasattr(self, 'plot_data_cache'):
                 self.plot_data_cache.clear_preprocess_cache()
-            # 使用完整更新流程
-            if not hasattr(self, '_style_update_timer'):
-                from PyQt6.QtCore import QTimer
-                self._style_update_timer = QTimer()
-                self._style_update_timer.setSingleShot(True)
-                self._style_update_timer.timeout.connect(self._auto_update_all_plots)
-            self._style_update_timer.start(300)
-            return
         
-        # 样式参数改变：只更新样式，不重新读取数据
-        # 重置定时器，100ms后执行更新（更快响应，防抖）
+        # 重置定时器，延迟执行更新（防抖）
         if hasattr(self, '_style_update_timer'):
-            # 确保连接到样式更新方法（不重新加载数据）
+            self._style_update_timer.stop()
+            # 断开之前的连接
             try:
                 self._style_update_timer.timeout.disconnect()
             except:
                 pass
-            self._style_update_timer.timeout.connect(self._auto_update_current_plot)
-            self._style_update_timer.stop()
-            self._style_update_timer.start(100)  # 从300ms减少到100ms，更快响应
+            # 将force_data_reload参数传递给_auto_update_all_plots
+            # 使用lambda捕获当前的force_data_reload值
+            self._style_update_timer.timeout.connect(
+                lambda: self._auto_update_all_plots(force_data_reload=force_data_reload)
+            )
+            self._style_update_timer.start(300)
         else:
-            # 如果定时器不存在，创建它
+            # 如果没有定时器，创建它
             from PyQt6.QtCore import QTimer
             self._style_update_timer = QTimer()
             self._style_update_timer.setSingleShot(True)
-            self._style_update_timer.timeout.connect(self._auto_update_current_plot)
-            self._style_update_timer.start(100)  # 从300ms减少到100ms，更快响应
+            self._style_update_timer.timeout.connect(
+                lambda: self._auto_update_all_plots(force_data_reload=force_data_reload)
+            )
+            self._style_update_timer.start(300)
     
     def _on_file_color_changed(self):
         """文件颜色改变时的回调函数（自动更新图表）"""
@@ -1265,8 +1270,13 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         finally:
             self._is_updating_plots = False
     
-    def _auto_update_all_plots(self):
-        """自动更新所有打开的绘图窗口（包括预处理参数改变时更新RRUFF库）"""
+    def _auto_update_all_plots(self, force_data_reload=False):
+        """
+        自动更新所有打开的绘图窗口（包括预处理参数改变时更新RRUFF库）
+        
+        Args:
+            force_data_reload: 如果为True，强制重新加载数据并重新运行分析（用于预处理参数改变时）
+        """
         # 防止重复更新：使用标志位
         if hasattr(self, '_is_updating_plots') and self._is_updating_plots:
             return
@@ -1290,7 +1300,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             for group_name, plot_window in self.plot_windows.items():
                 if plot_window and plot_window.isVisible():
                     try:
-                        # 重新运行绘图逻辑（会使用当前参数）
+                        # 重新运行绘图逻辑（会使用当前参数，包括预处理参数）
                         if not updated:
                             self.run_plot_logic()
                             updated = True
@@ -1305,40 +1315,53 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             group_comparison_window = self.plot_windows["GroupComparison"]
             if group_comparison_window and group_comparison_window.isVisible():
                 try:
-                    # 重新运行组瀑布图逻辑（会使用当前参数，包括颜色和位移）
+                    # 重新运行组瀑布图逻辑（会使用当前参数，包括预处理参数）
                     self.run_group_average_waterfall()
                 except Exception as e:
                     print(f"自动更新组瀑布图窗口失败: {e}")
+                    import traceback
+                    traceback.print_exc()
         
         # 更新NMF窗口（如果存在）
         if hasattr(self, 'nmf_window') and self.nmf_window is not None and self.nmf_window.isVisible():
             try:
-                # 重新获取样式参数并更新NMF窗口
-                style_params = self._get_current_style_params()
-                # 合并NMF特定参数
-                nmf_style_params = {
-                    **style_params,
-                    'comp1_color': getattr(self, 'comp1_color', '#034DFB'),
-                    'comp2_color': getattr(self, 'comp2_color', '#FF0000'),
-                    'comp_line_width': style_params.get('line_width', 1.2),
-                    'comp_line_style': style_params.get('line_style', '-'),
-                    'is_derivative': False,  # 二次导数在预处理流程中应用
-                    'global_stack_offset': self._get_stack_offset_from_panel(),
-                    'global_scale_factor': self.global_y_scale_factor_spin.value() if hasattr(self, 'global_y_scale_factor_spin') else 1.0,
-                    'x_axis_invert': style_params.get('x_axis_invert', False),
-                    'tick_font_size': style_params.get('tick_label_font', 16),
-                    'label_font_size': style_params.get('axis_title_font', 20),
-                    'title_font_size': style_params.get('title_fontsize', 20),
-                    'legend_font_size': style_params.get('legend_fontsize', 10),
-                    'weight_marker_style': 'o',
-                    'weight_marker_size': 5,
-                    'weight_line_style': '-',
-                    'weight_line_width': 1.0,
-                }
-                # 更新NMF窗口的样式参数并重新绘制
-                if hasattr(self.nmf_window, 'style_params'):
-                    self.nmf_window.style_params.update(nmf_style_params)
-                    self.nmf_window.plot_results(self.nmf_window.style_params)
+                if force_data_reload:
+                    # 预处理参数改变：需要重新运行NMF分析
+                    # 检查是否有NMF分析所需的数据
+                    folder = self.folder_input.text()
+                    if os.path.isdir(folder):
+                        # 重新运行NMF分析（会使用当前的预处理参数）
+                        if hasattr(self, '_run_nmf_analysis_legacy'):
+                            self._run_nmf_analysis_legacy()
+                        elif hasattr(self, 'run_nmf_analysis'):
+                            self.run_nmf_analysis()
+                else:
+                    # 只更新样式参数（不重新计算NMF）
+                    style_params = self._get_current_style_params()
+                    # 合并NMF特定参数
+                    nmf_style_params = {
+                        **style_params,
+                        'comp1_color': getattr(self, 'comp1_color', '#034DFB'),
+                        'comp2_color': getattr(self, 'comp2_color', '#FF0000'),
+                        'comp_line_width': style_params.get('line_width', 1.2),
+                        'comp_line_style': style_params.get('line_style', '-'),
+                        'is_derivative': False,  # 二次导数在预处理流程中应用
+                        'global_stack_offset': self._get_stack_offset_from_panel(),
+                        'global_scale_factor': self.global_y_scale_factor_spin.value() if hasattr(self, 'global_y_scale_factor_spin') else 1.0,
+                        'x_axis_invert': style_params.get('x_axis_invert', False),
+                        'tick_font_size': style_params.get('tick_label_font', 16),
+                        'label_font_size': style_params.get('axis_title_font', 20),
+                        'title_font_size': style_params.get('title_fontsize', 20),
+                        'legend_font_size': style_params.get('legend_fontsize', 10),
+                        'weight_marker_style': 'o',
+                        'weight_marker_size': 5,
+                        'weight_line_style': '-',
+                        'weight_line_width': 1.0,
+                    }
+                    # 更新NMF窗口的样式参数并重新绘制
+                    if hasattr(self.nmf_window, 'style_params'):
+                        self.nmf_window.style_params.update(nmf_style_params)
+                        self.nmf_window.plot_results(self.nmf_window.style_params)
             except Exception as e:
                 print(f"自动更新NMF窗口失败: {e}")
                 import traceback
@@ -1487,18 +1510,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         sys.stdout.write("[DEBUG] setup_ui: 开始设置UI...\n")
         sys.stdout.flush()
         # --- 菜单栏（项目、工具、帮助等）---
-        # 创建一个包装widget来确保菜单栏在正确的位置且可以点击
-        menu_bar_container = QFrame(self)
-        menu_bar_container.setFixedHeight(24)
-        menu_bar_container.setFrameShape(QFrame.Shape.NoFrame)
-        # 使用与窗口一致的背景色，确保没有视觉上的遮挡
-        menu_bar_container.setStyleSheet("background-color: transparent; border: none; margin: 0px; padding: 0px;")
-        menu_bar_container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-        menu_bar_layout = QHBoxLayout(menu_bar_container)
-        menu_bar_layout.setContentsMargins(0, 0, 0, 0)
-        menu_bar_layout.setSpacing(0)
-        
-        self.menu_bar = QMenuBar(menu_bar_container)
+        # 创建菜单栏（直接添加到主布局，不使用容器包装）
+        self.menu_bar = QMenuBar(self)
         # 设置菜单栏样式，背景透明以融入窗口，字体黑色，紧凑设计
         # 完全移除所有边框和背景，确保没有灰色条纹或遮挡
         self.menu_bar.setStyleSheet("""
@@ -1546,19 +1559,20 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 margin: 4px 0;
             }
         """)
-        # 设置菜单栏最小高度，使其更紧凑
-        self.menu_bar.setMinimumHeight(24)
-        self.menu_bar.setMaximumHeight(24)
+        # 设置菜单栏高度和样式
+        self.menu_bar.setFixedHeight(24)
         # 确保菜单栏可以接收鼠标事件
         self.menu_bar.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-        menu_bar_layout.addWidget(self.menu_bar)
-        menu_bar_layout.addStretch()
+        # 设置菜单栏的尺寸策略，确保它只占用必要的空间
+        self.menu_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
         self._setup_menu_bar()
-        # 对于QDialog，需要将菜单栏容器添加到布局中
-        self.main_layout.addWidget(menu_bar_container)
+        # 将菜单栏直接添加到主布局（作为第一个元素，确保在最上层）
+        self.main_layout.insertWidget(0, self.menu_bar)
         # 设置菜单栏不使用原生菜单栏
         self.menu_bar.setNativeMenuBar(False)
+        # 确保菜单栏可以接收鼠标事件（重要：必须在添加到布局后设置）
+        self.menu_bar.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         sys.stdout.write(f"[DEBUG] setup_ui: 菜单栏已添加，主布局子项数量: {self.main_layout.count()}\n")
         sys.stdout.flush()
         
@@ -1568,7 +1582,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         top_bar.setFrameShape(QFrame.Shape.NoFrame)
         # 设置紧凑的布局，减少高度
         top_bar_layout = QHBoxLayout(top_bar)
-        top_bar_layout.setContentsMargins(5, 2, 5, 2)  # 减小上下边距
+        top_bar_layout.setContentsMargins(5, 2, 5, 2)  # 恢复边距，确保GroupBox正常显示
         top_bar_layout.setSpacing(5)
         
         # A. 文件夹选择
@@ -1694,7 +1708,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         
         # --- 主按钮区：两列布局（左侧参数配置，右侧运行绘图）---
         buttons_container = QFrame()
-        buttons_container.setFrameShape(QFrame.Shape.Panel)
+        buttons_container.setFrameShape(QFrame.Shape.NoFrame)  # 移除面板边框，避免多余的条框
         buttons_layout = QHBoxLayout(buttons_container)
         buttons_layout.setSpacing(20)
         buttons_layout.setContentsMargins(20, 20, 20, 20)
@@ -1730,7 +1744,8 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         
         self.btn_peak = QPushButton("📈 波峰检测")
         self.btn_peak.setStyleSheet("font-size: 12pt; padding: 12px; text-align: left;")
-        self.btn_peak.clicked.connect(lambda: self.open_function_window('peak'))
+        # 重定向到样式与匹配窗口（波峰检测功能已整合到那里）
+        self.btn_peak.clicked.connect(self.open_style_matching_window)
         left_buttons_layout.addWidget(self.btn_peak)
         
         self.btn_nmf = QPushButton("🔬 NMF分析")
@@ -1814,6 +1829,14 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         
         # 设置主布局
         self.setLayout(self.main_layout)
+        
+        # 在布局设置完成后，确保菜单栏在最上层且可点击
+        # 这必须在所有布局设置完成后执行
+        if hasattr(self, 'menu_bar') and self.menu_bar:
+            self.menu_bar.raise_()
+            self.menu_bar.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+            # 确保菜单栏可以接收所有鼠标事件
+            self.menu_bar.setMouseTracking(True)
     
     def _on_folder_changed(self):
         """文件夹改变时自动检测跳过行数（优化版：延迟更长，避免频繁触发）"""
@@ -1995,8 +2018,13 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             self._style_matching_window = StyleMatchingWindow(self)
             # 保存面板引用，以便主窗口访问
             self.publication_style_panel = self._style_matching_window.get_publication_style_panel()
+            self.peak_detection_panel = self._style_matching_window.get_peak_detection_panel()
             self.peak_matching_panel = self._style_matching_window.get_peak_matching_panel()
             self.spectrum_scan_panel = self._style_matching_window.get_spectrum_scan_panel()
+            
+            # 连接波峰检测面板的信号
+            if hasattr(self.peak_detection_panel, 'config_changed'):
+                self.peak_detection_panel.config_changed.connect(self._on_style_param_changed)
             
             # 连接谱线扫描信号
             if hasattr(self.spectrum_scan_panel, 'scan_requested'):
@@ -3313,28 +3341,9 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 'is_quadratic_fit': False,
                 'quadratic_degree': 2,
                 
-                # 高级/波峰检测（增强版）
-                'peak_detection_enabled': self.peak_check.isChecked(),
-                'peak_height_threshold': self.peak_height_spin.value(),
-                'peak_distance_min': self.peak_distance_spin.value(),
-                'peak_prominence': self.peak_prominence_spin.value(),
-                'peak_width': self.peak_width_spin.value(),
-                'peak_wlen': self.peak_wlen_spin.value(),
-                'peak_rel_height': self.peak_rel_height_spin.value(),
-                'peak_show_label': self.peak_show_label_check.isChecked(),
-                'peak_label_font': self.peak_label_font_combo.currentText(),
-                'peak_label_size': self.peak_label_size_spin.value(),
-                'peak_label_color': self.peak_label_color_input.text().strip() or 'black',
-                'peak_label_bold': self.peak_label_bold_check.isChecked(),
-                'peak_label_rotation': self.peak_label_rotation_spin.value(),
-                'peak_marker_shape': self.peak_marker_shape_combo.currentText(),
-                'peak_marker_size': self.peak_marker_size_spin.value(),
-                'peak_marker_color': self.peak_marker_color_input.text().strip() or '',  # 空字符串表示使用线条颜色
-                'vertical_lines': self.parse_list_input(self.vertical_lines_input.toPlainText()),
-                'vertical_line_color': self.vertical_line_color_input.text().strip() or 'gray',
-                'vertical_line_width': self.vertical_line_width_spin.value(),
-                'vertical_line_style': self.vertical_line_style_combo.currentText(),
-                'vertical_line_alpha': self.vertical_line_alpha_spin.value(),
+                # 高级/波峰检测（增强版）- 优先从样式与匹配窗口获取
+                **self._get_peak_detection_params(),
+                **self._get_vertical_lines_params(),
                 # 匹配线样式参数（单独设置）
                 'match_line_color': self.match_line_color_input.text().strip() or 'red' if hasattr(self, 'match_line_color_input') else 'red',
                 'match_line_width': self.match_line_width_spin.value() if hasattr(self, 'match_line_width_spin') else 1.0,
@@ -4103,7 +4112,9 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 'tick_font_size': self.nmf_tick_font_spin.value(),
                 'legend_font_size': self.nmf_tick_font_spin.value() + 2,
                 'x_axis_invert': style_params.get('x_axis_invert', False),
-                'peak_detection_enabled': self.peak_check.isChecked(),
+                # 波峰检测和垂直参考线参数（优先从样式与匹配窗口获取）
+                **self._get_peak_detection_params(),
+                **self._get_vertical_lines_params(),
                 'nmf_top_title': self.nmf_top_title_input.text().strip(),
                 'nmf_bottom_title': self.nmf_bottom_title_input.text().strip(),
                 'nmf_top_title_fontsize': self.nmf_top_title_font_spin.value(),
@@ -4781,7 +4792,9 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 'tick_font_size': self.nmf_tick_font_spin.value(),
                 'legend_font_size': self.nmf_tick_font_spin.value() + 2,
                 'x_axis_invert': style_params.get('x_axis_invert', False),
-                'peak_detection_enabled': self.peak_check.isChecked(),
+                # 波峰检测和垂直参考线参数（优先从样式与匹配窗口获取）
+                **self._get_peak_detection_params(),
+                **self._get_vertical_lines_params(),
                 'nmf_top_title': self.nmf_top_title_input.text().strip(),
                 'nmf_bottom_title': self.nmf_bottom_title_input.text().strip(),
                 'nmf_top_title_fontsize': self.nmf_top_title_font_spin.value(),
@@ -4812,7 +4825,6 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 'individual_y_params': individual_y_params,
                 'nmf_legend_names': nmf_legend_names,
                 'control_data_list': control_data_for_plot,
-                'vertical_lines': vertical_lines,  # 垂直参考线
                 'vertical_line_color': '#034DFB',  # 默认蓝色
                 'vertical_line_style': '--',  # 默认虚线
                 'vertical_line_width': 0.8,  # 默认线宽
@@ -5483,14 +5495,59 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                     'shadow_label': std_label  # 保存阴影标签
                 })
                 
-                # 峰值检测（如果启用）
-                if hasattr(self, 'peak_check') and self.peak_check.isChecked():
+                # 峰值检测（如果启用）- 使用新的参数获取方法
+                peak_params = self._get_peak_detection_params()
+                if peak_params.get('peak_detection_enabled', False):
                     try:
                         from src.core.peak_detection_helper import detect_and_plot_peaks
-                        peak_params = self._get_peak_detection_params()
                         detect_and_plot_peaks(ax, common_x, final_y, final_y, peak_params, color=color)
                     except Exception as e:
                         print(f"峰值检测失败: {e}")
+                        import traceback
+                        traceback.print_exc()
+                
+                # 峰值匹配（如果启用）- 添加到组件平均图
+                if hasattr(self, 'peak_matching_panel') and self.peak_matching_panel:
+                    try:
+                        config = self.peak_matching_panel.get_config()
+                        pm = config.peak_matching
+                        if pm.enabled and len(win.waterfall_plot_data) > 0:
+                            from src.core.peak_matcher import PeakMatcher
+                            peak_matcher = PeakMatcher(tolerance=pm.tolerance)
+                            
+                            # 准备匹配数据（使用当前已绘制的数据）
+                            match_data = []
+                            for spec_data in win.waterfall_plot_data:
+                                match_data.append({
+                                    'x': spec_data['x'],
+                                    'y': spec_data['y'],
+                                    'label': spec_data['label'],
+                                    'color': spec_data['color']
+                                })
+                            
+                            # 执行峰值匹配
+                            matched_result = peak_matcher.match_multiple_spectra(
+                                match_data,
+                                reference_index=pm.reference_index if pm.reference_index >= 0 else len(match_data) - 1,
+                                mode=pm.mode
+                            )
+                            
+                            # 绘制匹配的峰值
+                            if matched_result and 'matches' in matched_result:
+                                matches = matched_result['matches']
+                                for spec_idx, match_info in matches.items():
+                                    if 'positions' in match_info:
+                                        peak_positions = match_info['positions']
+                                        spec_data = match_data[int(spec_idx)]
+                                        for peak_x in peak_positions:
+                                            x_idx = np.argmin(np.abs(spec_data['x'] - peak_x))
+                                            peak_y = spec_data['y'][x_idx] if x_idx < len(spec_data['y']) else 0
+                                            # 绘制峰值标记
+                                            ax.plot(peak_x, peak_y, marker=pm.marker_shape, 
+                                                   markersize=pm.marker_size, color=spec_data['color'], 
+                                                   alpha=0.7)
+                    except Exception as e:
+                        print(f"组件平均图峰值匹配失败: {e}")
                         import traceback
                         traceback.print_exc()
 
@@ -5544,11 +5601,11 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                                            color=spec_data['color'], marker='.', linestyle='',
                                            markersize=spec_data.get('linewidth', 1.2) * 3)
                                 
-                                # 重新应用峰值检测
-                                if hasattr(self, 'peak_check') and self.peak_check.isChecked():
+                                # 重新应用峰值检测（使用新的参数获取方法）
+                                peak_params = self._get_peak_detection_params()
+                                if peak_params.get('peak_detection_enabled', False):
                                     try:
                                         from src.core.peak_detection_helper import detect_and_plot_peaks
-                                        peak_params = self._get_peak_detection_params()
                                         detect_and_plot_peaks(ax, spec_data['x'], spec_y, spec_y, peak_params, color=spec_data['color'])
                                     except Exception as e:
                                         print(f"峰值检测失败: {e}")
@@ -5638,9 +5695,38 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             tick_width = style_params.get('tick_width', 1.0)
             tick_label_fontsize = style_params.get('tick_label_font', 16)
             
-            ax.tick_params(labelsize=tick_label_fontsize, direction=tick_direction, width=tick_width, labelfontfamily=current_font)
-            ax.tick_params(which='major', length=tick_len_major)
-            ax.tick_params(which='minor', length=tick_len_minor)
+            # 获取刻度显示控制（优先从样式与匹配窗口获取）
+            if hasattr(self, 'publication_style_panel') and self.publication_style_panel:
+                config = self.publication_style_panel.get_config()
+                ps = config.publication_style
+                tick_top = ps.tick_top if ps else True
+                tick_bottom = ps.tick_bottom if ps else True
+                tick_left = ps.tick_left if ps else True
+                tick_right = ps.tick_right if ps else True
+                show_bottom_xaxis = ps.show_bottom_xaxis if ps else True
+                show_left_yaxis = ps.show_left_yaxis if ps else True
+                show_top_xaxis = ps.show_top_xaxis if ps else False
+                show_right_yaxis = ps.show_right_yaxis if ps else False
+            else:
+                # 向后兼容：从style_params获取
+                tick_top = style_params.get('tick_top', True)
+                tick_bottom = style_params.get('tick_bottom', True)
+                tick_left = style_params.get('tick_left', True)
+                tick_right = style_params.get('tick_right', True)
+                show_bottom_xaxis = style_params.get('show_bottom_xaxis', True)
+                show_left_yaxis = style_params.get('show_left_yaxis', True)
+                show_top_xaxis = style_params.get('show_top_xaxis', False)
+                show_right_yaxis = style_params.get('show_right_yaxis', False)
+            
+            # 应用刻度显示控制
+            ax.tick_params(labelsize=tick_label_fontsize, direction=tick_direction, width=tick_width, labelfontfamily=current_font,
+                          top=tick_top, bottom=tick_bottom, left=tick_left, right=tick_right,
+                          labeltop=show_top_xaxis, labelbottom=show_bottom_xaxis, 
+                          labelleft=show_left_yaxis, labelright=show_right_yaxis)
+            ax.tick_params(which='major', length=tick_len_major,
+                          top=tick_top, bottom=tick_bottom, left=tick_left, right=tick_right)
+            ax.tick_params(which='minor', length=tick_len_minor,
+                          top=tick_top, bottom=tick_bottom, left=tick_left, right=tick_right)
             
             # 边框设置 (Spines) - 使用主菜单的样式参数
             border_sides = self.get_checked_border_sides()
@@ -5922,7 +6008,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             if success:
                 self.current_project_path = file_path
                 self._mark_project_saved()
-                QMessageBox.information(self, "成功", f"项目已保存到:\n{file_path}")
+                # 移除成功提示框，直接保存
             else:
                 QMessageBox.critical(self, "错误", "保存项目失败，请查看控制台输出")
     
@@ -6157,7 +6243,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                     if success:
                         self.current_project_path = file_path
                         self.project_unsaved_changes = False
-                        QMessageBox.information(self, "成功", f"项目已保存到:\n{file_path}")
+                        # 移除成功提示框，直接保存
                     else:
                         QMessageBox.critical(self, "错误", "保存项目失败，请查看控制台输出")
     
@@ -6206,7 +6292,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 self.current_project_path = file_path
                 self.project_unsaved_changes = False
                 self._mark_project_saved()  # 更新窗口标题
-                QMessageBox.information(self, "成功", f"项目已从以下文件加载:\n{file_path}\n\n请重新运行绘图以查看结果。")
+                # 移除成功提示框，直接加载
             else:
                 QMessageBox.critical(self, "错误", "加载项目失败，请查看控制台输出")
     
@@ -6865,6 +6951,77 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             sorted_files = sorted(files)
         
         return sorted_files
+    
+    def _get_peak_detection_params(self):
+        """获取波峰检测参数（优先从样式与匹配窗口获取）"""
+        # 优先从样式与匹配窗口的波峰检测面板获取
+        if hasattr(self, 'peak_detection_panel') and self.peak_detection_panel:
+            config = self.peak_detection_panel.get_config()
+            return {
+                'peak_detection_enabled': config.get('peak_detection_enabled', False),
+                'peak_height_threshold': config.get('peak_height', 0.0),
+                'peak_distance_min': config.get('peak_distance', 0),
+                'peak_prominence': config.get('peak_prominence', 0.0),
+                'peak_width': config.get('peak_width', 0.0),
+                'peak_wlen': config.get('peak_wlen', 0),
+                'peak_rel_height': config.get('peak_rel_height', 0.0),
+                'peak_show_label': config.get('peak_show_label', True),
+                'peak_label_font': config.get('peak_label_font', 'Times New Roman'),
+                'peak_label_size': config.get('peak_label_size', 10),
+                'peak_label_color': config.get('peak_label_color', 'black'),
+                'peak_label_bold': config.get('peak_label_bold', False),
+                'peak_label_rotation': config.get('peak_label_rotation', 0.0),
+                'peak_marker_shape': config.get('peak_marker_shape', 'x'),
+                'peak_marker_size': config.get('peak_marker_size', 10),
+                'peak_marker_color': config.get('peak_marker_color', ''),
+            }
+        
+        # 向后兼容：从旧的控件获取（如果存在）
+        return {
+            'peak_detection_enabled': self.peak_check.isChecked() if hasattr(self, 'peak_check') else False,
+            'peak_height_threshold': self.peak_height_spin.value() if hasattr(self, 'peak_height_spin') else 0.0,
+            'peak_distance_min': self.peak_distance_spin.value() if hasattr(self, 'peak_distance_spin') else 0,
+            'peak_prominence': self.peak_prominence_spin.value() if hasattr(self, 'peak_prominence_spin') else 0.0,
+            'peak_width': self.peak_width_spin.value() if hasattr(self, 'peak_width_spin') else 0.0,
+            'peak_wlen': self.peak_wlen_spin.value() if hasattr(self, 'peak_wlen_spin') else 0,
+            'peak_rel_height': self.peak_rel_height_spin.value() if hasattr(self, 'peak_rel_height_spin') else 0.0,
+            'peak_show_label': self.peak_show_label_check.isChecked() if hasattr(self, 'peak_show_label_check') else True,
+            'peak_label_font': self.peak_label_font_combo.currentText() if hasattr(self, 'peak_label_font_combo') else 'Times New Roman',
+            'peak_label_size': self.peak_label_size_spin.value() if hasattr(self, 'peak_label_size_spin') else 10,
+            'peak_label_color': self.peak_label_color_input.text().strip() if hasattr(self, 'peak_label_color_input') else 'black',
+            'peak_label_bold': self.peak_label_bold_check.isChecked() if hasattr(self, 'peak_label_bold_check') else False,
+            'peak_label_rotation': self.peak_label_rotation_spin.value() if hasattr(self, 'peak_label_rotation_spin') else 0.0,
+            'peak_marker_shape': self.peak_marker_shape_combo.currentText() if hasattr(self, 'peak_marker_shape_combo') else 'x',
+            'peak_marker_size': self.peak_marker_size_spin.value() if hasattr(self, 'peak_marker_size_spin') else 10,
+            'peak_marker_color': self.peak_marker_color_input.text().strip() if hasattr(self, 'peak_marker_color_input') else '',
+        }
+    
+    def _get_vertical_lines_params(self):
+        """获取垂直参考线参数（优先从样式与匹配窗口获取）"""
+        # 优先从样式与匹配窗口的波峰检测面板获取
+        if hasattr(self, 'peak_detection_panel') and self.peak_detection_panel:
+            try:
+                config = self.peak_detection_panel.get_config()
+                vertical_lines_text = config.get('vertical_lines', '')
+                return {
+                    'vertical_lines': self.parse_list_input(vertical_lines_text),
+                    'vertical_line_color': config.get('vertical_line_color', 'gray'),
+                    'vertical_line_width': config.get('vertical_line_width', 0.8),
+                    'vertical_line_style': config.get('vertical_line_style', ':'),
+                    'vertical_line_alpha': config.get('vertical_line_alpha', 0.7),
+                }
+            except Exception as e:
+                print(f"警告: 从peak_detection_panel获取垂直参考线配置失败: {e}")
+        
+        # 向后兼容：从旧的控件获取（如果存在）
+        # 注意：这些控件可能在peak_detection_tab中，只有在样式与匹配窗口未打开时才使用
+        return {
+            'vertical_lines': self.parse_list_input(self.vertical_lines_input.toPlainText()) if hasattr(self, 'vertical_lines_input') else [],
+            'vertical_line_color': self.vertical_line_color_input.text().strip() if hasattr(self, 'vertical_line_color_input') else 'gray',
+            'vertical_line_width': self.vertical_line_width_spin.value() if hasattr(self, 'vertical_line_width_spin') else 0.8,
+            'vertical_line_style': self.vertical_line_style_combo.currentText() if hasattr(self, 'vertical_line_style_combo') else ':',
+            'vertical_line_alpha': self.vertical_line_alpha_spin.value() if hasattr(self, 'vertical_line_alpha_spin') else 0.7,
+        }
         
     def parse_list_input(self, text, data_type=float):
         """解析列表输入（逗号、换行或空格分隔的数字）"""

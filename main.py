@@ -224,23 +224,18 @@ def main():
         # 新建项目
         project_path = new_project_info['path']
         project_note = new_project_info.get('note', '')
-        # 保存新项目
+        # 保存新项目（不显示提示框）
         success = window.save_project_with_info(project_path, project_note)
-        if success:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.information(window, "项目已创建", f"新项目 '{new_project_info['name']}' 已创建并保存")
-        else:
+        if not success:
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.critical(window, "错误", "创建项目失败，请查看控制台输出")
             sys.exit(1)
     elif selected_path:
-        # 加载项目
+        # 加载项目（不显示提示框）
         success = window.project_save_manager.load_project(selected_path, window)
         if success:
             window.current_project_path = selected_path
             window.project_unsaved_changes = False
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.information(window, "项目已加载", f"项目已从以下文件加载:\n{selected_path}\n\n请重新运行绘图以查看结果。")
         else:
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.critical(window, "错误", "加载项目失败，请查看控制台输出")

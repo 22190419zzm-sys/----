@@ -432,9 +432,13 @@ class NMFResultWindow(QDialog):
                             mode=match_config.mode
                         )
                         
-                        # 绘制匹配的峰值
+                        # 绘制匹配的峰值（使用配置中的标记样式）
                         if matched_result and 'matches' in matched_result:
                             matches = matched_result['matches']
+                            marker_shape = match_config.marker_shape if hasattr(match_config, 'marker_shape') else 'o'
+                            marker_size = match_config.marker_size if hasattr(match_config, 'marker_size') else 8
+                            marker_color = match_config.marker_color if hasattr(match_config, 'marker_color') else None
+                            
                             for spec_idx, match_info in matches.items():
                                 if 'positions' in match_info:
                                     peak_positions = match_info['positions']
@@ -444,8 +448,11 @@ class NMFResultWindow(QDialog):
                                         # 找到最近的X值索引
                                         x_idx = np.argmin(np.abs(spec_data['x'] - peak_x))
                                         peak_y = spec_data['y'][x_idx] if x_idx < len(spec_data['y']) else 0
+                                        # 使用配置的颜色，如果没有则使用线条颜色
+                                        plot_color = marker_color if marker_color else spec_data['color']
                                         # 绘制峰值标记
-                                        ax1.plot(peak_x, peak_y, 'ro', markersize=8, alpha=0.7)
+                                        ax1.plot(peak_x, peak_y, marker=marker_shape, 
+                                               markersize=marker_size, color=plot_color, alpha=0.7)
                 except Exception as e:
                     print(f"NMF峰值匹配失败: {e}")
                     import traceback

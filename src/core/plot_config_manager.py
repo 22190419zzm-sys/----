@@ -87,6 +87,10 @@ class PublicationStyleConfig:
     x_axis_invert: bool = False
     show_x_values: bool = True
     show_y_values: bool = True
+    show_bottom_xaxis: bool = True  # 显示下X轴
+    show_left_yaxis: bool = True  # 显示左Y轴
+    show_top_xaxis: bool = False  # 显示上X轴
+    show_right_yaxis: bool = False  # 显示右Y轴
 
 
 @dataclass

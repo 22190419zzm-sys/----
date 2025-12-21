@@ -138,11 +138,21 @@ class MplPlotWindow(QDialog):
         self.last_geometry = (current_rect.x(), current_rect.y(), current_rect.width(), current_rect.height())
         
         # 与数据处理.py保持一致：不调整figure大小，让matplotlib自动适应窗口
-        # tight_layout会自动调整布局以适应窗口大小
+        # 使用subplots_adjust代替tight_layout以避免警告
         try:
+            # 先尝试tight_layout，如果失败则使用subplots_adjust
             with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=UserWarning, message='.*tight_layout.*')
-                self.canvas.figure.tight_layout()
+                warnings.filterwarnings('ignore', category=UserWarning)
+                self.canvas.figure.tight_layout(pad=1.0)
+        except:
+            # 如果tight_layout失败，使用subplots_adjust作为后备
+            try:
+                self.canvas.figure.subplots_adjust(
+                    left=0.12, right=0.95, bottom=0.12, top=0.95
+                )
+            except:
+                pass
+        try:
             self.canvas.draw()
         except:
             pass
@@ -1244,15 +1254,18 @@ class MplPlotWindow(QDialog):
                 pad=main_title_pad
             )
         
-        # 使用try-except处理tight_layout警告，如果失败则使用subplots_adjust
+        # 使用subplots_adjust代替tight_layout以避免警告
         try:
+            # 先尝试tight_layout，如果失败则使用subplots_adjust
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore', category=UserWarning)
                 self.canvas.figure.tight_layout(pad=1.0)
         except:
             # 如果tight_layout失败，使用subplots_adjust作为后备
             try:
-                self.canvas.figure.subplots_adjust(left=0.15, right=0.95, bottom=0.15, top=0.95)
+                self.canvas.figure.subplots_adjust(
+                    left=0.12, right=0.95, bottom=0.12, top=0.95
+                )
             except:
                 pass  # 如果都失败，继续执行
         

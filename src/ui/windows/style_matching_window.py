@@ -5,13 +5,14 @@
 """
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QWidget, QScrollArea,
-    QLabel, QComboBox, QGroupBox, QPushButton
+    QLabel, QComboBox, QGroupBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from typing import Optional, Dict, Any
 
 from src.ui.panels.publication_style_panel import PublicationStylePanel
 from src.ui.panels.peak_matching_panel import PeakMatchingPanel
+from src.ui.panels.peak_detection_panel import PeakDetectionPanel
 from src.ui.panels.spectrum_scan_panel import SpectrumScanPanel
 
 
@@ -70,9 +71,15 @@ class StyleMatchingWindow(QDialog):
         # 子图选择
         target_group_layout.addWidget(QLabel("选择子图:"))
         self.subplot_combo = QComboBox()
-        self.subplot_combo.addItems(["子图 0", "子图 1"])
+        self.subplot_combo.addItems(["所有子图", "子图 0", "子图 1"])
         self.subplot_combo.currentIndexChanged.connect(self._on_subplot_changed)
         target_group_layout.addWidget(self.subplot_combo)
+        
+        # 总布局选项（应用到所有子图）
+        self.apply_to_all_subplots_check = QCheckBox("应用到所有子图")
+        self.apply_to_all_subplots_check.setChecked(False)
+        self.apply_to_all_subplots_check.setToolTip("勾选后，样式设置将应用到当前窗口的所有子图")
+        target_group_layout.addWidget(self.apply_to_all_subplots_check)
         
         # 刷新按钮
         refresh_btn = QPushButton("🔄 刷新窗口列表")
@@ -98,13 +105,21 @@ class StyleMatchingWindow(QDialog):
         left_layout.addWidget(self.publication_style_panel)
         splitter.addWidget(left_widget)
         
-        # 第三列：峰值匹配面板（紧凑）
+        # 第三列：波峰检测与垂直参考线面板
         middle_widget = QWidget()
         middle_layout = QVBoxLayout(middle_widget)
         middle_layout.setContentsMargins(0, 0, 0, 0)
-        self.peak_matching_panel = PeakMatchingPanel(self)
-        middle_layout.addWidget(self.peak_matching_panel)
+        self.peak_detection_panel = PeakDetectionPanel(self)
+        middle_layout.addWidget(self.peak_detection_panel)
         splitter.addWidget(middle_widget)
+        
+        # 第四列：峰值匹配面板（紧凑）
+        matching_widget = QWidget()
+        matching_layout = QVBoxLayout(matching_widget)
+        matching_layout.setContentsMargins(0, 0, 0, 0)
+        self.peak_matching_panel = PeakMatchingPanel(self)
+        matching_layout.addWidget(self.peak_matching_panel)
+        splitter.addWidget(matching_widget)
         
         # 最右列：谱线扫描面板（给更多空间）
         right_widget = QWidget()
@@ -114,8 +129,8 @@ class StyleMatchingWindow(QDialog):
         right_layout.addWidget(self.spectrum_scan_panel)
         splitter.addWidget(right_widget)
         
-        # 设置列宽比例：目标:样式:匹配:扫描 = 1:2:1:2
-        splitter.setSizes([200, 400, 250, 500])
+        # 设置列宽比例：目标:样式:波峰检测:匹配:扫描 = 1:2:2:1.5:2
+        splitter.setSizes([200, 400, 350, 250, 500])
         
         main_layout.addWidget(splitter)
         
@@ -131,18 +146,115 @@ class StyleMatchingWindow(QDialog):
         
         # 连接信号
         self.publication_style_panel.config_changed.connect(self._on_config_changed)
+        self.peak_detection_panel.config_changed.connect(self._on_config_changed)
         self.peak_matching_panel.config_changed.connect(self._on_config_changed)
         self.spectrum_scan_panel.config_changed.connect(self._on_config_changed)
     
     def _on_config_changed(self):
         """配置改变时，通知主窗口更新"""
+        # 如果"应用到所有子图"被勾选，应用样式到所有子图
+        if self.apply_to_all_subplots_check.isChecked() and self.current_window_id:
+            self._apply_style_to_all_subplots()
+        
         if self.parent():
             if hasattr(self.parent(), '_on_style_param_changed'):
                 self.parent()._on_style_param_changed()
     
+    def _apply_style_to_all_subplots(self):
+        """应用样式到当前窗口的所有子图"""
+        if not self.current_window_id or self.current_window_id not in self.detected_windows:
+            return
+        
+        window_info = self.detected_windows[self.current_window_id]
+        window = window_info['window']
+        
+        # 获取当前配置
+        config = self.publication_style_panel.get_config()
+        ps = config.publication_style
+        
+        # 根据窗口类型应用样式
+        if window_info['type'] == 'NMFResultWindow':
+            # NMF窗口有两个子图（ax1和ax2）
+            if hasattr(window, 'ax1') and window.ax1:
+                self._apply_publication_style_to_axes(window.ax1, ps)
+            if hasattr(window, 'ax2') and window.ax2:
+                self._apply_publication_style_to_axes(window.ax2, ps)
+            # 重绘
+            if hasattr(window, 'canvas'):
+                window.canvas.draw()
+        elif window_info['type'] == 'MplPlotWindow':
+            # 普通绘图窗口只有一个axes
+            if hasattr(window, 'canvas') and hasattr(window.canvas, 'axes'):
+                self._apply_publication_style_to_axes(window.canvas.axes, ps)
+                window.canvas.draw()
+    
+    def _apply_publication_style_to_axes(self, ax, ps):
+        """应用出版质量样式到指定的axes"""
+        import matplotlib.pyplot as plt
+        
+        # 设置字体
+        font_family = ps.font_family
+        current_font = 'Times New Roman' if font_family == 'Times New Roman' else font_family
+        
+        # 设置刻度显示控制
+        ax.tick_params(axis='both', which='major',
+                      direction=ps.tick_direction,
+                      length=ps.tick_len_major,
+                      width=ps.tick_width,
+                      labelsize=ps.tick_label_fontsize,
+                      top=ps.tick_top,
+                      bottom=ps.tick_bottom,
+                      left=ps.tick_left,
+                      right=ps.tick_right,
+                      labeltop=ps.show_top_xaxis,
+                      labelbottom=ps.show_bottom_xaxis,
+                      labelleft=ps.show_left_yaxis,
+                      labelright=ps.show_right_yaxis)
+        ax.tick_params(axis='both', which='minor',
+                      direction=ps.tick_direction,
+                      length=ps.tick_len_minor,
+                      width=ps.tick_width,
+                      top=ps.tick_top,
+                      bottom=ps.tick_bottom,
+                      left=ps.tick_left,
+                      right=ps.tick_right)
+        
+        # 设置刻度标签字体
+        for label in ax.get_xticklabels() + ax.get_yticklabels():
+            label.set_fontfamily(current_font)
+        
+        # 设置坐标轴标签字体
+        if ax.xaxis.label:
+            ax.xaxis.label.set_fontfamily(current_font)
+            ax.xaxis.label.set_fontsize(ps.xlabel_fontsize)
+        if ax.yaxis.label:
+            ax.yaxis.label.set_fontfamily(current_font)
+            ax.yaxis.label.set_fontsize(ps.ylabel_fontsize)
+        if ax.title:
+            ax.title.set_fontfamily(current_font)
+            ax.title.set_fontsize(ps.title_fontsize)
+        
+        # 设置边框
+        ax.spines['top'].set_visible(ps.spine_top)
+        ax.spines['bottom'].set_visible(ps.spine_bottom)
+        ax.spines['left'].set_visible(ps.spine_left)
+        ax.spines['right'].set_visible(ps.spine_right)
+        for spine in ax.spines.values():
+            spine.set_linewidth(ps.spine_width)
+        
+        # 设置网格
+        if ps.show_grid:
+            ax.grid(True, alpha=ps.grid_alpha)
+        else:
+            ax.grid(False)
+    
     def get_publication_style_panel(self):
         """获取出版质量样式面板"""
         return self.publication_style_panel
+    
+    def get_peak_detection_panel(self):
+        """获取波峰检测面板"""
+        return self.peak_detection_panel
     
     def get_peak_matching_panel(self):
         """获取峰值匹配面板"""

@@ -45,19 +45,29 @@ class PeakMatchingPanel(QWidget):
         # 匹配模式（使用更紧凑的布局）
         mode_layout = QHBoxLayout()
         self.mode_combo = QComboBox()
-        # 使用元组存储 (显示文本, 实际值)
+        # 使用元组存储 (显示文本, 实际值, 说明)
         self.mode_items = [
-            ("all_peaks", "all_peaks"),
-            ("matched_only", "matched_only"),
-            ("all_matched", "all_matched"),
-            ("top_display", "top_display")
+            ("显示参考谱所有峰值", "all_peaks", "只显示参考光谱检测到的所有峰值，不进行匹配"),
+            ("显示匹配到的峰值", "matched_only", "显示每个谱线与参考谱线匹配到的峰值"),
+            ("显示所有谱线共有的峰值", "all_matched", "只显示所有谱线都匹配到的共同峰值"),
+            ("在顶部显示参考峰值", "top_display", "在最上方谱线显示参考光谱的峰值")
         ]
-        for display_text, _ in self.mode_items:
+        for display_text, _, _ in self.mode_items:
             self.mode_combo.addItem(display_text)
-        self.mode_combo.setMaximumWidth(150)
+        self.mode_combo.setMaximumWidth(200)
+        # 添加工具提示
+        for i, (_, _, tooltip) in enumerate(self.mode_items):
+            self.mode_combo.setItemData(i, tooltip, role=256)  # Qt.ToolTipRole
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         mode_layout.addWidget(self.mode_combo)
         mode_layout.addStretch()
         matching_layout.addRow("匹配模式:", mode_layout)
+        
+        # 模式说明标签
+        self.mode_description_label = QLabel("")
+        self.mode_description_label.setStyleSheet("color: #666; font-size: 9pt; padding: 5px;")
+        self.mode_description_label.setWordWrap(True)
+        matching_layout.addRow("", self.mode_description_label)
         
         # 匹配容差和参考索引（同一行）
         params_layout = QHBoxLayout()
@@ -257,10 +267,17 @@ class PeakMatchingPanel(QWidget):
             line_edit.setText(color.name())
             self._on_config_changed()
     
+    def _on_mode_changed(self, index):
+        """匹配模式改变时"""
+        if 0 <= index < len(self.mode_items):
+            _, _, description = self.mode_items[index]
+            self.mode_description_label.setText(description)
+        self._on_config_changed()
+    
     def connect_signals(self):
         """连接信号"""
         self.enabled_check.stateChanged.connect(self._on_config_changed)
-        self.mode_combo.currentTextChanged.connect(self._on_config_changed)
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self.tolerance_spin.valueChanged.connect(self._on_config_changed)
         self.reference_index_spin.valueChanged.connect(self._on_config_changed)
         
@@ -298,12 +315,13 @@ class PeakMatchingPanel(QWidget):
         self.enabled_check.setChecked(pm.enabled)
         # 根据模式找到对应的索引
         mode_index = -1
-        for i, (_, value) in enumerate(self.mode_items):
+        for i, (_, value, _) in enumerate(self.mode_items):
             if value == pm.mode:
                 mode_index = i
                 break
         if mode_index >= 0:
             self.mode_combo.setCurrentIndex(mode_index)
+            self._on_mode_changed(mode_index)
         
         self.tolerance_spin.setValue(pm.tolerance)
         self.reference_index_spin.setValue(pm.reference_index)
@@ -348,7 +366,7 @@ class PeakMatchingPanel(QWidget):
         # 获取模式的实际值
         current_index = self.mode_combo.currentIndex()
         if 0 <= current_index < len(self.mode_items):
-            _, pm.mode = self.mode_items[current_index]
+            _, pm.mode, _ = self.mode_items[current_index]
         else:
             pm.mode = "all_matched"
         
