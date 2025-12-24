@@ -1,0 +1,5 @@
+# 此文件用于确保resources目录被git跟踪
+# 请将你的图标文件放在此目录：
+# - icon.ico: 应用程序图标（Windows ICO格式）
+# - splash_logo.png: 启动画面logo（PNG格式，建议512x512）
+

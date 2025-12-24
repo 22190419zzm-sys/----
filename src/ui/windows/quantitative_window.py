@@ -63,6 +63,12 @@ class QuantitativeResultWindow(QDialog):
         super().__init__(parent_dialog)
         self.parent_dialog = parent_dialog  # 保存主窗口引用
         self.setWindowTitle("定量校准结果")
+        # 设置窗口图标
+        try:
+            from src.utils.icon_manager import set_window_icon
+            set_window_icon(self)
+        except:
+            pass
         # 使用Window类型而不是Dialog，这样最小化后能显示窗口名称
         self.setWindowFlags(
             Qt.WindowType.Window |

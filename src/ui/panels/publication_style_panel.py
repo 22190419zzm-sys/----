@@ -121,7 +121,9 @@ class PublicationStylePanel(QWidget):
         self.shadow_alpha_spin.setValue(0.25)
         
         pub_layout.addRow(self._create_h_layout([self.show_grid_check, QLabel("网格 Alpha:"), self.grid_alpha_spin]))
-        pub_layout.addRow("阴影 Alpha:", self.shadow_alpha_spin)
+        self.show_shadow_check = QCheckBox("显示阴影")
+        self.show_shadow_check.setChecked(True)  # 默认显示阴影
+        pub_layout.addRow("阴影控制:", self._create_h_layout([self.show_shadow_check, QLabel("Alpha:"), self.shadow_alpha_spin]))
         
         # Axes Spines
         self.spine_top_check = QCheckBox("Top", checked=True)
@@ -307,6 +309,7 @@ class PublicationStylePanel(QWidget):
         self.tick_width_spin.setValue(ps.tick_width)
         self.show_grid_check.setChecked(ps.show_grid)
         self.grid_alpha_spin.setValue(ps.grid_alpha)
+        self.show_shadow_check.setChecked(getattr(ps, 'show_shadow', True))
         self.shadow_alpha_spin.setValue(ps.shadow_alpha)
         self.spine_top_check.setChecked(ps.spine_top)
         self.spine_bottom_check.setChecked(ps.spine_bottom)
@@ -369,6 +372,7 @@ class PublicationStylePanel(QWidget):
         ps.tick_width = self.tick_width_spin.value()
         ps.show_grid = self.show_grid_check.isChecked()
         ps.grid_alpha = self.grid_alpha_spin.value()
+        ps.show_shadow = self.show_shadow_check.isChecked()
         ps.shadow_alpha = self.shadow_alpha_spin.value()
         ps.spine_top = self.spine_top_check.isChecked()
         ps.spine_bottom = self.spine_bottom_check.isChecked()

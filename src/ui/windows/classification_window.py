@@ -69,6 +69,12 @@ class ClassificationResultWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("分类验证结果")
+        # 设置窗口图标
+        try:
+            from src.utils.icon_manager import set_window_icon
+            set_window_icon(self)
+        except:
+            pass
         # 使用Window类型而不是Dialog，这样最小化后能显示窗口名称
         self.setWindowFlags(
             Qt.WindowType.Window |
@@ -1373,6 +1379,30 @@ class SpectraConfigDialog(QDialog):
             self.vertical_line_style_combo.currentTextChanged.connect(self._on_style_param_changed)
         if hasattr(self, 'vertical_line_alpha_spin'):
             self.vertical_line_alpha_spin.valueChanged.connect(self._on_style_param_changed)
+        
+        # 绘图模式和全局设置参数（只更新当前窗口）
+        if hasattr(self, 'plot_mode_combo'):
+            self.plot_mode_combo.currentTextChanged.connect(self._on_style_param_changed)
+        if hasattr(self, 'plot_style_combo'):
+            self.plot_style_combo.currentTextChanged.connect(self._on_style_param_changed)
+        if hasattr(self, 'derivative_check'):
+            self.derivative_check.stateChanged.connect(self._on_style_param_changed)
+        if hasattr(self, 'x_axis_invert_check'):
+            self.x_axis_invert_check.stateChanged.connect(self._on_style_param_changed)
+        if hasattr(self, 'show_y_val_check'):
+            self.show_y_val_check.stateChanged.connect(self._on_style_param_changed)
+        if hasattr(self, 'global_stack_offset_spin'):
+            self.global_stack_offset_spin.valueChanged.connect(self._on_style_param_changed)
+        if hasattr(self, 'global_y_scale_factor_spin'):
+            self.global_y_scale_factor_spin.valueChanged.connect(self._on_style_param_changed)
+        if hasattr(self, 'main_title_input'):
+            self.main_title_input.textChanged.connect(self._on_style_param_changed)
+        if hasattr(self, 'main_title_font_spin'):
+            self.main_title_font_spin.valueChanged.connect(self._on_style_param_changed)
+        if hasattr(self, 'main_title_pad_spin'):
+            self.main_title_pad_spin.valueChanged.connect(self._on_style_param_changed)
+        if hasattr(self, 'main_title_show_check'):
+            self.main_title_show_check.stateChanged.connect(self._on_style_param_changed)
     
     def _on_style_param_changed(self):
         """样式参数变化时的回调函数（防抖）"""
@@ -1386,36 +1416,308 @@ class SpectraConfigDialog(QDialog):
         # 颜色改变时立即更新所有打开的绘图窗口
         self._on_style_param_changed()
     
+    def _update_active_plot_window(self):
+        """只更新当前激活的绘图窗口（仅更新样式，不重新读取数据）"""
+        # 防止递归调用和重复更新
+        if hasattr(self, '_is_updating_plot'):
+            if self._is_updating_plot:
+                return
+        self._is_updating_plot = True
+        
+        try:
+            # 找到当前激活的窗口（用户正在查看的窗口）
+            win = None
+            group_name = None
+            
+            # 优先使用 active_plot_window
+            if hasattr(self, 'active_plot_window') and self.active_plot_window is not None:
+                win = self.active_plot_window
+                if win.isVisible():
+                    # 找到对应的组名
+                    for g_name, plot_window in self.plot_windows.items():
+                        if plot_window == win:
+                            group_name = g_name
+                            break
+            
+            # 如果没有找到，尝试找到当前激活的窗口（用户正在查看的）
+            if win is None or not win.isVisible() or group_name is None:
+                from PyQt6.QtWidgets import QApplication
+                active_window = QApplication.activeWindow()
+                
+                # 检查是否是绘图窗口
+                for g_name, plot_window in self.plot_windows.items():
+                    if plot_window == active_window or (plot_window.isVisible() and plot_window.isActiveWindow()):
+                        win = plot_window
+                        group_name = g_name
+                        break
+            
+            # 如果还是没有找到，使用第一个可见的窗口
+            if win is None or not win.isVisible() or group_name is None:
+                for g_name, plot_window in self.plot_windows.items():
+                    if plot_window.isVisible():
+                        win = plot_window
+                        group_name = g_name
+                        break
+            
+            if win is None or group_name is None:
+                return
+            
+            # 收集当前参数（不重新读取数据）
+            folder = self.folder_input.text()
+            if not os.path.isdir(folder):
+                return
+            
+            # 物理截断值
+            x_min_phys = self._parse_optional_float(self.x_min_phys_input.text())
+            x_max_phys = self._parse_optional_float(self.x_max_phys_input.text())
+            
+            # 收集参数（与run_plot_logic相同）
+            params = {
+                # 模式与全局
+                'plot_mode': self.plot_mode_combo.currentText(),
+                'show_y_values': self.show_y_val_check.isChecked(),
+                'is_derivative': self.derivative_check.isChecked(),
+                'x_axis_invert': self.x_axis_invert_check.isChecked(),
+                'global_stack_offset': self.global_stack_offset_spin.value(),
+                'global_scale_factor': self.global_y_scale_factor_spin.value(),
+                'main_title_text': self.main_title_input.text(),
+                'main_title_fontsize': self.main_title_font_spin.value(),
+                'main_title_pad': self.main_title_pad_spin.value(),
+                'main_title_show': self.main_title_show_check.isChecked(),
+                'plot_style': self.plot_style_combo.currentText(),
+                
+                # 标签与边距
+                'xlabel_text': self.xlabel_input.text(),
+                'ylabel_text': self.ylabel_input.text(),
+                'xlabel_fontsize': self.xlabel_font_spin.value(),
+                'xlabel_pad': self.xlabel_pad_spin.value(),
+                'xlabel_show': self.xlabel_show_check.isChecked(),
+                'ylabel_fontsize': self.ylabel_font_spin.value(),
+                'ylabel_pad': self.ylabel_pad_spin.value(),
+                'ylabel_show': self.ylabel_show_check.isChecked(),
+                
+                # 预处理
+                'qc_enabled': self.qc_check.isChecked(),
+                'qc_threshold': self.qc_threshold_spin.value(),
+                'is_baseline_als': self.baseline_als_check.isChecked(),
+                'als_lam': self.lam_spin.value(),
+                'als_p': self.p_spin.value(),
+                'is_baseline': False,
+                'baseline_points': 50,
+                'baseline_poly': 3,
+                'is_smoothing': self.smoothing_check.isChecked(),
+                'smoothing_window': self.smoothing_window_spin.value(),
+                'smoothing_poly': self.smoothing_poly_spin.value(),
+                'normalization_mode': self.normalization_combo.currentText(),
+                
+                # Bose-Einstein
+                'is_be_correction': self.be_check.isChecked(),
+                'be_temp': self.be_temp_spin.value(),
+                
+                # 全局动态变换和整体Y轴偏移
+                'global_transform_mode': self.global_transform_combo.currentText(),
+                'global_log_base': self.global_log_base_combo.currentText(),
+                'global_log_offset': self.global_log_offset_spin.value(),
+                'global_sqrt_offset': self.global_sqrt_offset_spin.value(),
+                'global_y_offset': self.global_y_offset_spin.value() if hasattr(self, 'global_y_offset_spin') else 0.0,
+                
+                # 高级/波峰检测
+                'peak_detection_enabled': self.peak_check.isChecked(),
+                'peak_height_threshold': self.peak_height_spin.value(),
+                'peak_distance_min': self.peak_distance_spin.value(),
+                'peak_prominence': self.peak_prominence_spin.value(),
+                'peak_width': self.peak_width_spin.value(),
+                'peak_wlen': self.peak_wlen_spin.value(),
+                'peak_rel_height': self.peak_rel_height_spin.value(),
+                'peak_show_label': self.peak_show_label_check.isChecked(),
+                'peak_label_font': self.peak_label_font_combo.currentText(),
+                'peak_label_size': self.peak_label_size_spin.value(),
+                'peak_label_color': self.peak_label_color_input.text().strip() or 'black',
+                'peak_label_bold': self.peak_label_bold_check.isChecked(),
+                'peak_label_rotation': self.peak_label_rotation_spin.value(),
+                'peak_marker_shape': self.peak_marker_shape_combo.currentText(),
+                'peak_marker_size': self.peak_marker_size_spin.value(),
+                'peak_marker_color': self.peak_marker_color_input.text().strip() or '',
+                'vertical_lines': self.parse_list_input(self.vertical_lines_input.toPlainText()),
+                'vertical_line_color': self.vertical_line_color_input.text().strip() or 'gray',
+                'vertical_line_width': self.vertical_line_width_spin.value(),
+                'vertical_line_style': self.vertical_line_style_combo.currentText(),
+                'vertical_line_alpha': self.vertical_line_alpha_spin.value(),
+                
+                # 出版质量样式
+                'fig_width': self.fig_width_spin.value(),
+                'fig_height': self.fig_height_spin.value(),
+                'fig_dpi': self.fig_dpi_spin.value(),
+                'font_family': self.font_family_combo.currentText(),
+                'axis_title_fontsize': self.axis_title_font_spin.value(),
+                'tick_label_fontsize': self.tick_label_font_spin.value(),
+                'legend_fontsize': self.legend_font_spin.value(),
+                'line_width': self.line_width_spin.value(),
+                'line_style': self.line_style_combo.currentText(),
+                'tick_direction': self.tick_direction_combo.currentText(),
+                'tick_len_major': self.tick_len_major_spin.value(),
+                'tick_len_minor': self.tick_len_minor_spin.value(),
+                'tick_width': self.tick_width_spin.value(),
+                'show_grid': self.show_grid_check.isChecked(),
+                'grid_alpha': self.grid_alpha_spin.value(),
+                'shadow_alpha': self.shadow_alpha_spin.value(),
+                'show_legend': self.show_legend_check.isChecked(),
+                'legend_frame': self.legend_frame_check.isChecked(),
+                'legend_loc': self.legend_loc_combo.currentText(),
+                'legend_ncol': self.legend_column_spin.value() if hasattr(self, 'legend_column_spin') else 1,
+                'legend_columnspacing': self.legend_columnspacing_spin.value() if hasattr(self, 'legend_columnspacing_spin') else 2.0,
+                'legend_labelspacing': self.legend_labelspacing_spin.value() if hasattr(self, 'legend_labelspacing_spin') else 0.5,
+                'legend_handlelength': self.legend_handlelength_spin.value() if hasattr(self, 'legend_handlelength_spin') else 2.0,
+                'border_sides': self.get_checked_border_sides(),
+                'border_linewidth': self.spine_width_spin.value(),
+                'aspect_ratio': self.aspect_ratio_spin.value(),
+            }
+            
+            # 读取独立控件值（包括颜色）
+            ind_params = {}
+            group_colors = {}
+            for k, v in self.individual_control_widgets.items():
+                transform_type = v['transform'].currentText()
+                transform_mode = 'none'
+                transform_params = {}
+                
+                if transform_type == '对数变换 (Log)':
+                    transform_mode = 'log'
+                    transform_params = {
+                        'base': float(v['log_base'].currentText()) if v['log_base'].currentText() == '10' else np.e,
+                        'offset': v['log_offset'].value()
+                    }
+                elif transform_type == '平方根变换 (Sqrt)':
+                    transform_mode = 'sqrt'
+                    transform_params = {
+                        'offset': v['sqrt_offset'].value()
+                    }
+                
+                ind_params[k] = {
+                    'scale': v['scale'].value(),
+                    'offset': v['offset'].value(),
+                    'color': v.get('color', None),
+                    'transform': transform_mode,
+                    'transform_params': transform_params
+                }
+                
+                # 收集组颜色
+                n_chars = self.n_chars_spin.value()
+                if n_chars > 0:
+                    g_name = k[:n_chars] if len(k) >= n_chars else k
+                else:
+                    g_name = k
+                
+                if g_name not in group_colors:
+                    color_text = v.get('color', None)
+                    if color_text and hasattr(color_text, 'text'):
+                        color_value = color_text.text().strip() or None
+                        if color_value:
+                            group_colors[g_name] = color_value
+            
+            params['individual_y_params'] = ind_params
+            params['group_colors'] = group_colors
+            
+            # 构建文件颜色映射
+            file_colors = {}
+            for k, v in self.individual_control_widgets.items():
+                color_widget = v.get('color')
+                if color_widget and hasattr(color_widget, 'text'):
+                    color_text = color_widget.text().strip()
+                    if color_text:
+                        file_colors[k] = color_text
+            params['file_colors'] = file_colors
+            
+            # 读取重命名
+            rename_map = {k: v.text().strip() for k, v in self.legend_rename_widgets.items() if v.text().strip()}
+            params['legend_names'] = rename_map
+            
+            # 重新读取该组的数据（使用缓存的数据如果可能）
+            skip = self.skip_rows_spin.value()
+            all_files = sorted(glob.glob(os.path.join(folder, '*.csv')) + glob.glob(os.path.join(folder, '*.txt')))
+            
+            # 提取对照文件
+            c_text = self.control_files_input.toPlainText()
+            c_names = [x.strip() for x in c_text.replace('\n', ',').split(',') if x.strip()]
+            
+            control_data_list = []
+            files_to_remove = []
+            for c_name_base in c_names:
+                found_file = None
+                for ext in ['.txt', '.csv', '.TXT', '.CSV']:
+                    c_name = c_name_base + ext if not c_name_base.endswith(ext) else c_name_base
+                    full_p = os.path.join(folder, c_name)
+                    if full_p in all_files:
+                        found_file = full_p
+                        break
+                
+                if found_file:
+                    try:
+                        x, y = self.read_data(found_file, skip, x_min_phys, x_max_phys)
+                        control_data_list.append({
+                            'df': pd.DataFrame({'Wavenumber': x, 'Intensity': y}),
+                            'label': rename_map.get(os.path.splitext(os.path.basename(found_file))[0], os.path.splitext(os.path.basename(found_file))[0]),
+                            'filename': os.path.basename(found_file)
+                        })
+                        files_to_remove.append(found_file)
+                    except:
+                        pass
+            
+            plot_files = [f for f in all_files if f not in files_to_remove]
+            params['control_data_list'] = control_data_list
+            
+            # 分组
+            n_chars = self.n_chars_spin.value()
+            groups = group_files_by_name(plot_files, n_chars)
+            
+            # 筛选组别
+            target_g_text = self.groups_input.text()
+            target_gs = [x.strip() for x in target_g_text.split(',') if x.strip()]
+            if target_gs:
+                groups = {k: v for k, v in groups.items() if k in target_gs}
+            
+            # 只更新当前激活的组
+            if group_name in groups:
+                g_files = groups[group_name]
+                g_data = []
+                for f in g_files:
+                    try:
+                        x, y = self.read_data(f, skip, x_min_phys, x_max_phys)
+                        g_data.append((f, x, y))
+                    except:
+                        pass
+                
+                params['grouped_files_data'] = g_data
+                # 只更新当前窗口，不会触发其他窗口的更新
+                win.update_plot(params)
+        
+        except Exception as e:
+            print(f"自动更新当前绘图窗口失败: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # 重置更新标志
+            self._is_updating_plot = False
+    
     def _auto_update_all_plots(self):
-        """自动更新所有打开的绘图窗口（仅更新样式，不重新读取数据）"""
-        # 更新所有主绘图窗口
-        for group_name, plot_window in self.plot_windows.items():
-            if plot_window and plot_window.isVisible():
-                try:
-                    # 重新运行绘图逻辑（会使用当前参数）
-                    self.run_plot_logic()
-                    break  # 只更新一次，因为run_plot_logic会更新所有窗口
-                except Exception as e:
-                    print(f"自动更新绘图窗口 {group_name} 失败: {e}")
+        """自动更新当前激活的绘图窗口（仅更新样式，不重新读取数据）"""
+        # 防止递归调用
+        if hasattr(self, '_is_auto_updating'):
+            if self._is_auto_updating:
+                return
+        self._is_auto_updating = True
         
-        # 更新组瀑布图窗口（如果存在）
-        if "GroupComparison" in self.plot_windows:
-            group_comparison_window = self.plot_windows["GroupComparison"]
-            if group_comparison_window and group_comparison_window.isVisible():
-                try:
-                    # 重新运行组瀑布图逻辑（会使用当前参数，包括颜色和位移）
-                    self.run_group_average_waterfall()
-                except Exception as e:
-                    print(f"自动更新组瀑布图窗口失败: {e}")
-        
-        # 更新NMF窗口（如果存在）
-        if hasattr(self, 'nmf_window') and self.nmf_window and self.nmf_window.isVisible():
-            try:
-                # 如果有rerun_nmf_plot方法，使用它（不重新计算）
-                if hasattr(self, 'rerun_nmf_plot'):
-                    self.rerun_nmf_plot()
-            except Exception as e:
-                print(f"自动更新NMF窗口失败: {e}")
+        try:
+            # 只更新当前激活的窗口（主绘图窗口）
+            self._update_active_plot_window()
+            
+            # 注意：组瀑布图和NMF窗口不应该在自动更新时重新绘制
+            # 因为这会触发 run_group_average_waterfall() 和 run_nmf_analysis()
+            # 这些方法会重新读取数据并更新所有窗口，导致其他窗口弹出
+            # 如果用户需要更新这些窗口，应该手动点击相应的按钮
+            
+        finally:
+            self._is_auto_updating = False
 
     # --- 核心：数据读取 (新增物理截断) ---
     def read_data(self, file_path, skip_rows, x_min_phys=None, x_max_phys=None):
@@ -4177,6 +4479,11 @@ class SpectraConfigDialog(QDialog):
 
     # --- 核心：运行绘图逻辑 ---
     def run_plot_logic(self):
+        """运行绘图逻辑（更新所有窗口）- 只能手动调用，不会被自动更新触发"""
+        # 防止自动更新触发此方法
+        if hasattr(self, '_is_updating_plot') and self._is_updating_plot:
+            return
+        
         try:
             folder = self.folder_input.text()
             if not os.path.isdir(folder): return
@@ -6033,6 +6340,11 @@ class SpectraConfigDialog(QDialog):
 
     # --- 核心：组间平均值瀑布图 (保留原功能) ---
     def run_group_average_waterfall(self):
+        """运行组瀑布图（更新所有窗口）- 只能手动调用，不会被自动更新触发"""
+        # 防止自动更新触发此方法
+        if hasattr(self, '_is_auto_updating') and self._is_auto_updating:
+            return
+        
         try:
             folder = self.folder_input.text()
             if not os.path.isdir(folder): return

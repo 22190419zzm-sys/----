@@ -285,13 +285,68 @@ class PeakDetectionPanel(QWidget):
     
     def load_config(self):
         """从配置管理器加载配置"""
-        # TODO: 从配置管理器加载配置
-        pass
+        try:
+            from src.core.plot_config_manager import PlotConfigManager
+            config_manager = PlotConfigManager()
+            config = config_manager.get_config()
+            pd = config.peak_detection
+            
+            # 加载峰值检测参数
+            self.peak_check.setChecked(pd.enabled)
+            self.peak_height_spin.setValue(pd.height_threshold)
+            self.peak_distance_spin.setValue(pd.distance_min)
+            self.peak_prominence_spin.setValue(pd.prominence if pd.prominence is not None else 0.0)
+            self.peak_width_spin.setValue(pd.width if pd.width is not None else 0.0)
+            self.peak_wlen_spin.setValue(pd.wlen if pd.wlen is not None else 0)
+            self.peak_rel_height_spin.setValue(pd.rel_height if pd.rel_height is not None else 0.0)
+            
+            # 加载峰值显示参数
+            self.peak_show_label_check.setChecked(pd.show_label)
+            self.peak_label_font_combo.setCurrentText(pd.label_font)
+            self.peak_label_size_spin.setValue(pd.label_size)
+            self.peak_label_color_input.setText(pd.label_color)
+            self.peak_label_bold_check.setChecked(pd.label_bold)
+            self.peak_label_rotation_spin.setValue(pd.label_rotation)
+            self.peak_marker_shape_combo.setCurrentText(pd.marker_shape)
+            self.peak_marker_size_spin.setValue(pd.marker_size)
+            self.peak_marker_color_input.setText(pd.marker_color if pd.marker_color else "")
+        except Exception as e:
+            print(f"加载峰值检测配置失败: {e}")
+            import traceback
+            traceback.print_exc()
     
     def save_config(self):
         """保存配置到配置管理器"""
-        # TODO: 保存配置到配置管理器
-        pass
+        try:
+            from src.core.plot_config_manager import PlotConfigManager
+            config_manager = PlotConfigManager()
+            config = config_manager.get_config()
+            
+            # 更新峰值检测配置
+            pd = config.peak_detection
+            pd.enabled = self.peak_check.isChecked()
+            pd.height_threshold = self.peak_height_spin.value()
+            pd.distance_min = self.peak_distance_spin.value()
+            pd.prominence = self.peak_prominence_spin.value() if self.peak_prominence_spin.value() > 0 else None
+            pd.width = self.peak_width_spin.value() if self.peak_width_spin.value() > 0 else None
+            pd.wlen = self.peak_wlen_spin.value() if self.peak_wlen_spin.value() > 0 else None
+            pd.rel_height = self.peak_rel_height_spin.value() if self.peak_rel_height_spin.value() > 0 else None
+            pd.show_label = self.peak_show_label_check.isChecked()
+            pd.label_font = self.peak_label_font_combo.currentText()
+            pd.label_size = self.peak_label_size_spin.value()
+            pd.label_color = self.peak_label_color_input.text().strip()
+            pd.label_bold = self.peak_label_bold_check.isChecked()
+            pd.label_rotation = self.peak_label_rotation_spin.value()
+            pd.marker_shape = self.peak_marker_shape_combo.currentText()
+            pd.marker_size = self.peak_marker_size_spin.value()
+            pd.marker_color = self.peak_marker_color_input.text().strip()
+            
+            # 保存到QSettings
+            config_manager.save_config()
+        except Exception as e:
+            print(f"保存峰值检测配置失败: {e}")
+            import traceback
+            traceback.print_exc()
     
     def get_config(self):
         """获取当前配置"""

@@ -18,6 +18,12 @@ class MplPlotWindow(QDialog):
         super().__init__(parent)
         self.group_name = group_name
         self.setWindowTitle(f"光谱图 - 组别: {group_name}")
+        # 设置窗口图标
+        try:
+            from src.utils.icon_manager import set_window_icon
+            set_window_icon(self)
+        except:
+            pass
         # 使用Window类型而不是Dialog，这样最小化后能显示窗口名称
         self.setWindowFlags(
             Qt.WindowType.Window |
@@ -618,7 +624,9 @@ class MplPlotWindow(QDialog):
                 ax.plot(common_x, mean_y, color=color, linewidth=line_width, label=mean_label)
             else:
                 ax.plot(common_x, mean_y, color=color, linewidth=line_width, label=mean_label)
-                if std_y is not None:
+                # 检查是否显示阴影（从样式配置获取）
+                show_shadow = plot_params.get('show_shadow', True)
+                if show_shadow and std_y is not None:
                     # 确保 alpha 值在 0-1 范围内
                     safe_alpha = max(0.0, min(1.0, shadow_alpha))
                     ax.fill_between(common_x, mean_y - std_y, mean_y + std_y, color=color, alpha=safe_alpha, label=std_label)
@@ -962,8 +970,8 @@ class MplPlotWindow(QDialog):
                         self.canvas.default_ylim = ax.get_ylim()
 
         ylabel_final = "2nd Derivative" if is_derivative else plot_params.get('ylabel_text', 'Intensity')
-        if is_be_correction:
-             ylabel_final = f"BE Corrected {ylabel_final} @ {be_temp}K"
+        # 注意：BE校正后仍然使用样式配置中的Y轴标题，不强制修改
+        # 如果需要显示BE校正信息，可以在标题或图例中说明
 
         xlabel_fontsize = plot_params.get('xlabel_fontsize', axis_title_fontsize)
         xlabel_pad = plot_params.get('xlabel_pad', 10.0)

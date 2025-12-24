@@ -21,6 +21,12 @@ class StartupProjectDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("选择项目")
+        # 设置窗口图标
+        try:
+            from src.utils.icon_manager import set_window_icon
+            set_window_icon(self)
+        except:
+            pass
         self.setMinimumSize(600, 500)
         self.resize(700, 600)
         

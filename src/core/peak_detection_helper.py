@@ -27,16 +27,29 @@ def detect_and_plot_peaks(ax: Axes, x_data: np.ndarray, y_detect: np.ndarray,
         return
     
     try:
+        # 获取峰值检测参数
+        peak_height = plot_params.get('peak_height_threshold', 0.0)
+        peak_distance = plot_params.get('peak_distance_min', 10)
+        peak_prominence = plot_params.get('peak_prominence', None)
+        peak_width = plot_params.get('peak_width', None)
+        peak_wlen = plot_params.get('peak_wlen', None)
+        peak_rel_height = plot_params.get('peak_rel_height', None)
+        
+        # 确保参数正确传递（如果参数不存在，使用默认值）
+        # 注意：这里不做任何自动调整，直接使用用户设置的值
+        # 调试：打印参数值以验证传递是否正确
+        # print(f"[DEBUG] 峰值检测参数传递: height={peak_height}, distance={peak_distance}, prominence={peak_prominence}, width={peak_width}, wlen={peak_wlen}, rel_height={peak_rel_height}")
+        
         # 使用统一的峰值检测方法
         peak_matcher = PeakMatcher()
         peaks, properties = peak_matcher.detect_peaks(
             x_data, y_detect,
-            height=plot_params.get('peak_height_threshold', 0.0),
-            distance=plot_params.get('peak_distance_min', 10),
-            prominence=plot_params.get('peak_prominence', None),
-            width=plot_params.get('peak_width', None),
-            wlen=plot_params.get('peak_wlen', None),
-            rel_height=plot_params.get('peak_rel_height', None)
+            height=peak_height,
+            distance=peak_distance,
+            prominence=peak_prominence,
+            width=peak_width,
+            wlen=peak_wlen,
+            rel_height=peak_rel_height
         )
         
         if len(peaks) > 0:

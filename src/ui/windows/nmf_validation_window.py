@@ -61,6 +61,12 @@ class NMFFitValidationWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("NMF拟合验证")
+        # 设置窗口图标
+        try:
+            from src.utils.icon_manager import set_window_icon
+            set_window_icon(self)
+        except:
+            pass
         # 使用Window类型而不是Dialog，这样最小化后能显示窗口名称
         self.setWindowFlags(
             Qt.WindowType.Window |

@@ -1342,9 +1342,14 @@ class MplPlotWindow(QDialog):
         self.current_ax = ax
 
         # --- 2. 提取基础参数 ---
-        grouped_files_data = plot_params['grouped_files_data'] 
+        grouped_files_data = plot_params.get('grouped_files_data', [])
+        if not grouped_files_data:
+            # 如果没有提供数据，尝试从当前绘图数据重建（用于样式更新）
+            # 但更安全的方式是返回，让调用者重新读取数据
+            print("警告: update_plot 缺少 grouped_files_data，无法更新绘图")
+            return
         control_data_list = plot_params.get('control_data_list', []) 
-        individual_y_params = plot_params['individual_y_params'] 
+        individual_y_params = plot_params.get('individual_y_params', {}) 
         
         # --- 3. 提取显示/模式参数 ---
         plot_mode = plot_params.get('plot_mode', 'Normal Overlay')
@@ -1713,6 +1718,9 @@ class MplPlotWindow(QDialog):
             # 整体Y轴偏移（预处理最后一步，在二次导数之后）
             mean_y = mean_y + global_y_offset
             
+            # 应用堆叠偏移（Mean + Shadow 模式也应该支持堆叠）
+            mean_y = mean_y + (current_plot_index * global_stack_offset)
+            
             color = custom_colors[current_plot_index % len(custom_colors)]
             
             # 使用重命名后的图例名称（如果有）
@@ -1752,8 +1760,10 @@ class MplPlotWindow(QDialog):
                 ax.plot(common_x, mean_y, color=color, linewidth=line_width, label=mean_label)
             else:
                 ax.plot(common_x, mean_y, color=color, linewidth=line_width, label=mean_label)
-                # 阴影颜色与线条颜色一致，确保图例颜色也一致
-                if std_y is not None:
+                # 检查是否显示阴影（从样式配置获取）
+                show_shadow = plot_params.get('show_shadow', True)
+                if show_shadow and std_y is not None:
+                    # 阴影颜色与线条颜色一致，确保图例颜色也一致
                     ax.fill_between(common_x, mean_y - std_y, mean_y + std_y, color=color, alpha=shadow_alpha, label=std_label)
             
             # 存储均值数据 (用于可能的叠加拟合)
@@ -1864,9 +1874,8 @@ class MplPlotWindow(QDialog):
 
         # 标签
         ylabel_final = "2nd Derivative" if is_derivative else plot_params['ylabel_text']
-        # 检查是否进行了 BE 校正来调整 Y 轴标签
-        if is_be_correction:
-             ylabel_final = f"BE Corrected {ylabel_final} @ {be_temp}K"
+        # 注意：BE校正后仍然使用样式配置中的Y轴标题，不强制修改
+        # 如果需要显示BE校正信息，可以在标题或图例中说明
 
         # 使用GUI中的X轴标题控制参数
         xlabel_fontsize = plot_params.get('xlabel_fontsize', axis_title_fontsize)

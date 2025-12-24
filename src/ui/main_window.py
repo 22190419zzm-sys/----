@@ -129,6 +129,13 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         sys.stdout.flush()
         self.setWindowTitle("光谱数据处理工作站（GTzhou组 - Pro版）")
         
+        # 设置窗口图标
+        try:
+            from src.utils.icon_manager import set_window_icon
+            set_window_icon(self)
+        except Exception as e:
+            print(f"警告: 无法设置窗口图标: {e}")
+        
         # 使用Window类型而不是Dialog，这样最小化后能显示窗口名称
         self.setWindowFlags(
             Qt.WindowType.Window |
@@ -634,6 +641,10 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         if hasattr(self, 'match_line_alpha_spin'):
             self.match_line_alpha_spin.valueChanged.connect(self._on_style_param_changed)
         
+        # 全局缩放因子（也需要触发自动更新）
+        if hasattr(self, 'global_y_scale_factor_spin'):
+            self.global_y_scale_factor_spin.valueChanged.connect(self._on_style_param_changed)
+        
         # 预处理参数（需要强制重新加载数据，因为会影响预处理结果）
         # 这些参数改变时需要清空预处理缓存并重新读取数据
         preprocess_params = [
@@ -916,6 +927,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 'tick_width': ps.tick_width,
                 'show_grid': ps.show_grid,
                 'grid_alpha': ps.grid_alpha,
+                'show_shadow': ps.show_shadow,
                 'shadow_alpha': ps.shadow_alpha,
                 'show_legend': ps.show_legend,
                 'legend_frame': ps.legend_frame,
@@ -1133,7 +1145,27 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         if force_data_reload:
             # 清空相关缓存
             if hasattr(self, 'plot_data_cache'):
+                # 物理截断改变时，需要清除文件缓存（不仅仅是预处理缓存）
+                # 因为物理截断是在数据读取阶段应用的
                 self.plot_data_cache.clear_preprocess_cache()
+                # 检查是否是物理截断参数改变
+                if hasattr(self, '_last_x_min_phys') or hasattr(self, '_last_x_max_phys'):
+                    current_x_min = self._parse_optional_float(self.x_min_phys_input.text()) if hasattr(self, 'x_min_phys_input') else None
+                    current_x_max = self._parse_optional_float(self.x_max_phys_input.text()) if hasattr(self, 'x_max_phys_input') else None
+                    last_x_min = getattr(self, '_last_x_min_phys', None)
+                    last_x_max = getattr(self, '_last_x_max_phys', None)
+                    # 如果物理截断范围改变，清除文件缓存
+                    if current_x_min != last_x_min or current_x_max != last_x_max:
+                        self.plot_data_cache.clear_file_cache()
+                    # 更新记录的值
+                    self._last_x_min_phys = current_x_min
+                    self._last_x_max_phys = current_x_max
+                else:
+                    # 首次记录物理截断值
+                    if hasattr(self, 'x_min_phys_input'):
+                        self._last_x_min_phys = self._parse_optional_float(self.x_min_phys_input.text())
+                    if hasattr(self, 'x_max_phys_input'):
+                        self._last_x_max_phys = self._parse_optional_float(self.x_max_phys_input.text())
         
         # 重置定时器，延迟执行更新（防抖）
         if hasattr(self, '_style_update_timer'):
@@ -1283,44 +1315,83 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         self._is_updating_plots = True
         
         try:
+            # 更新当前已打开的绘图窗口（只更新已检测到的窗口，不创建新窗口）
+            if hasattr(self, 'plot_windows') and self.plot_windows:
+                for window_name, window in list(self.plot_windows.items()):
+                    if window and window.isVisible():
+                        try:
+                            # 特殊处理：GroupComparison窗口需要重新运行run_group_average_waterfall
+                            if window_name == "GroupComparison":
+                                # GroupComparison窗口使用特殊的绘制逻辑，需要重新运行完整绘制
+                                self.run_group_average_waterfall()
+                                continue
+                            
+                            # 准备绘图参数（使用当前样式和预处理参数）
+                            # 注意：需要根据窗口的group_name读取正确的数据
+                            params = self._prepare_plot_params()
+                            if params and 'grouped_files_data' in params:
+                                # 检查窗口是否有group_name，如果有且数据不匹配，重新读取该组的数据
+                                if hasattr(window, 'group_name') and window.group_name:
+                                    # 检查当前数据是否属于该组
+                                    current_data = params.get('grouped_files_data', [])
+                                    if current_data:
+                                        # 检查第一个文件的组名是否匹配
+                                        first_file = current_data[0][0] if isinstance(current_data[0], tuple) else current_data[0].get('file_path', '')
+                                        if first_file:
+                                            from src.utils.helpers import group_files_by_name
+                                            n_chars = self.n_chars_spin.value()
+                                            folder = self.folder_input.text()
+                                            if os.path.isdir(folder):
+                                                all_files = sorted(glob.glob(os.path.join(folder, '*.csv')) + glob.glob(os.path.join(folder, '*.txt')))
+                                                groups = group_files_by_name(all_files, n_chars)
+                                                if window.group_name in groups:
+                                                    # 重新读取该组的数据
+                                                    skip = self.skip_rows_spin.value()
+                                                    x_min_phys = self._parse_optional_float(self.x_min_phys_input.text()) if hasattr(self, 'x_min_phys_input') else None
+                                                    x_max_phys = self._parse_optional_float(self.x_max_phys_input.text()) if hasattr(self, 'x_max_phys_input') else None
+                                                    g_files = groups[window.group_name]
+                                                    g_data = []
+                                                    for f in g_files:
+                                                        try:
+                                                            x, y = self.read_data(f, skip, x_min_phys, x_max_phys)
+                                                            g_data.append((f, x, y))
+                                                        except: pass
+                                                    if g_data:
+                                                        params['grouped_files_data'] = g_data
+                                
+                                # 更新绘图窗口
+                                window.update_plot(params)
+                                # 保存plot_params以便项目恢复时使用
+                                if hasattr(window, '_last_plot_params'):
+                                    window._last_plot_params = params.copy()
+                        except Exception as e:
+                            print(f"自动更新绘图窗口 {window_name} 失败: {e}")
+                            import traceback
+                            traceback.print_exc()
+            
             # 更新批量绘图窗口（包括RRUFF库预处理参数和绘图）
             # 注意：这里只更新批量绘图窗口，不更新主窗口的RRUFF库（避免重复处理）
             if hasattr(self, 'batch_plot_window') and self.batch_plot_window and self.batch_plot_window.isVisible():
                 try:
                     # 更新RRUFF库预处理参数（这个方法会检查参数是否改变，只在改变时才重新处理）
-                    self.batch_plot_window.update_rruff_preprocessing()
-                    # update_rruff_preprocessing 内部已经会调用 _update_plots_with_rruff，不需要重复调用
+                    if force_data_reload:
+                        self.batch_plot_window.update_rruff_preprocessing()
+                    # 触发样式参数更新（延迟300ms，避免频繁更新）
+                    if hasattr(self.batch_plot_window, '_style_update_timer'):
+                        self.batch_plot_window._style_update_timer.stop()
+                        self.batch_plot_window._style_update_timer.start(300)
                 except Exception as e:
                     print(f"更新批量绘图窗口失败: {e}")
                     import traceback
                     traceback.print_exc()
             
-            # 更新所有主绘图窗口（只更新一次，避免重复）
-            updated = False
-            for group_name, plot_window in self.plot_windows.items():
-                if plot_window and plot_window.isVisible():
-                    try:
-                        # 重新运行绘图逻辑（会使用当前参数，包括预处理参数）
-                        if not updated:
-                            self.run_plot_logic()
-                            updated = True
-                        break  # 只更新一次，因为run_plot_logic会更新所有窗口
-                    except Exception as e:
-                        print(f"自动更新绘图窗口 {group_name} 失败: {e}")
+            # 注意：自动更新不应该调用 run_plot_logic() 或 run_group_average_waterfall()
+            # 因为这些方法会重新读取数据并更新所有窗口，导致其他窗口弹出
+            # 如果用户需要更新这些窗口，应该手动点击相应的按钮
+            # 这里只更新批量绘图窗口的RRUFF预处理参数
+            
         finally:
             self._is_updating_plots = False
-        
-        # 更新组瀑布图窗口（如果存在）
-        if "GroupComparison" in self.plot_windows:
-            group_comparison_window = self.plot_windows["GroupComparison"]
-            if group_comparison_window and group_comparison_window.isVisible():
-                try:
-                    # 重新运行组瀑布图逻辑（会使用当前参数，包括预处理参数）
-                    self.run_group_average_waterfall()
-                except Exception as e:
-                    print(f"自动更新组瀑布图窗口失败: {e}")
-                    import traceback
-                    traceback.print_exc()
         
         # 更新NMF窗口（如果存在）
         if hasattr(self, 'nmf_window') and self.nmf_window is not None and self.nmf_window.isVisible():
@@ -2029,6 +2100,12 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
             # 连接谱线扫描信号
             if hasattr(self.spectrum_scan_panel, 'scan_requested'):
                 self.spectrum_scan_panel.scan_requested.connect(self._on_scan_spectra_requested)
+            # 连接谱线扫描面板的配置改变信号（堆叠偏移等）
+            if hasattr(self.spectrum_scan_panel, 'config_changed'):
+                self.spectrum_scan_panel.config_changed.connect(self._on_style_param_changed)
+            # 连接堆叠偏移改变信号
+            if hasattr(self.spectrum_scan_panel, 'stack_offset_spin'):
+                self.spectrum_scan_panel.stack_offset_spin.valueChanged.connect(self._on_style_param_changed)
         
         window = self._style_matching_window
         
@@ -3050,7 +3127,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         if not hasattr(self, 'nmf_component_controls_layout') or self.nmf_component_controls_layout is None:
             # 如果布局不存在，创建它
             if not hasattr(self, 'nmf_component_controls_widget'):
-                from PyQt6.QtWidgets import QWidget, QVBoxLayout
+                # QWidget 和 QVBoxLayout 已在文件顶部导入，不需要局部导入
                 self.nmf_component_controls_layout = QVBoxLayout()
                 self.nmf_component_controls_widget = QWidget()
                 self.nmf_component_controls_widget.setLayout(self.nmf_component_controls_layout)
@@ -3367,6 +3444,7 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                 'tick_width': ps.tick_width if ps else 1.0,
                 'show_grid': ps.show_grid if ps else True,
                 'grid_alpha': ps.grid_alpha if ps else 0.2,
+                'show_shadow': ps.show_shadow if ps else True,
                 'shadow_alpha': ps.shadow_alpha if ps else 0.25,
                 'show_legend': ps.show_legend if ps else True,
                 'legend_frame': ps.legend_frame if ps else True,
@@ -5438,10 +5516,15 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
                     config = self.publication_style_panel.get_config()
                     ps = config.publication_style
                     shadow_alpha = ps.shadow_alpha if ps else 0.25
-                    show_shadow = True  # 默认显示阴影
+                    show_shadow = ps.show_shadow if ps else True  # 从配置获取阴影显示开关
                 else:
-                    shadow_alpha = 0.25  # 默认值
-                    show_shadow = True
+                    # 从配置管理器获取
+                    from src.core.plot_config_manager import PlotConfigManager
+                    config_manager = PlotConfigManager()
+                    config = config_manager.get_config()
+                    ps = config.publication_style
+                    shadow_alpha = ps.shadow_alpha if ps else 0.25
+                    show_shadow = ps.show_shadow if ps else True
                 
                 # 确保 alpha 值在 0-1 范围内
                 safe_alpha = max(0.0, min(1.0, shadow_alpha))
@@ -6956,35 +7039,56 @@ class SpectraConfigDialog(QDialog, NMFPanelMixin, COSPanelMixin, ClassifyPanelMi
         """获取波峰检测参数（优先从样式与匹配窗口获取）"""
         # 优先从样式与匹配窗口的波峰检测面板获取
         if hasattr(self, 'peak_detection_panel') and self.peak_detection_panel:
-            config = self.peak_detection_panel.get_config()
-            return {
-                'peak_detection_enabled': config.get('peak_detection_enabled', False),
-                'peak_height_threshold': config.get('peak_height', 0.0),
-                'peak_distance_min': config.get('peak_distance', 0),
-                'peak_prominence': config.get('peak_prominence', 0.0),
-                'peak_width': config.get('peak_width', 0.0),
-                'peak_wlen': config.get('peak_wlen', 0),
-                'peak_rel_height': config.get('peak_rel_height', 0.0),
-                'peak_show_label': config.get('peak_show_label', True),
-                'peak_label_font': config.get('peak_label_font', 'Times New Roman'),
-                'peak_label_size': config.get('peak_label_size', 10),
-                'peak_label_color': config.get('peak_label_color', 'black'),
-                'peak_label_bold': config.get('peak_label_bold', False),
-                'peak_label_rotation': config.get('peak_label_rotation', 0.0),
-                'peak_marker_shape': config.get('peak_marker_shape', 'x'),
-                'peak_marker_size': config.get('peak_marker_size', 10),
-                'peak_marker_color': config.get('peak_marker_color', ''),
-            }
+            try:
+                # 直接读取控件的当前值，确保获取最新值
+                config = self.peak_detection_panel.get_config()
+                # 确保获取到最新的配置值
+                peak_height_val = config.get('peak_height', 0.0)
+                peak_prominence_val = config.get('peak_prominence', 0.0)
+                peak_width_val = config.get('peak_width', 0.0)
+                peak_wlen_val = config.get('peak_wlen', 0)
+                peak_rel_height_val = config.get('peak_rel_height', 0.0)
+                
+                params = {
+                    'peak_detection_enabled': config.get('peak_detection_enabled', False),
+                    'peak_height_threshold': peak_height_val,  # 直接使用用户设置的值，不做自动调整
+                    'peak_distance_min': config.get('peak_distance', 0),
+                    'peak_prominence': peak_prominence_val if peak_prominence_val > 0 else None,
+                    'peak_width': peak_width_val if peak_width_val > 0 else None,
+                    'peak_wlen': peak_wlen_val if peak_wlen_val > 0 else None,
+                    'peak_rel_height': peak_rel_height_val if peak_rel_height_val > 0 else None,
+                    'peak_show_label': config.get('peak_show_label', True),
+                    'peak_label_font': config.get('peak_label_font', 'Times New Roman'),
+                    'peak_label_size': config.get('peak_label_size', 10),
+                    'peak_label_color': config.get('peak_label_color', 'black'),
+                    'peak_label_bold': config.get('peak_label_bold', False),
+                    'peak_label_rotation': config.get('peak_label_rotation', 0.0),
+                    'peak_marker_shape': config.get('peak_marker_shape', 'x'),
+                    'peak_marker_size': config.get('peak_marker_size', 10),
+                    'peak_marker_color': config.get('peak_marker_color', ''),
+                }
+                # 调试信息：打印峰值检测参数
+                # print(f"[DEBUG] 峰值检测参数: height={params['peak_height_threshold']}, distance={params['peak_distance_min']}, prominence={params['peak_prominence']}")
+                return params
+            except Exception as e:
+                print(f"获取峰值检测参数失败: {e}")
+                import traceback
+                traceback.print_exc()
         
         # 向后兼容：从旧的控件获取（如果存在）
+        peak_prominence_val = self.peak_prominence_spin.value() if hasattr(self, 'peak_prominence_spin') else 0.0
+        peak_width_val = self.peak_width_spin.value() if hasattr(self, 'peak_width_spin') else 0.0
+        peak_wlen_val = self.peak_wlen_spin.value() if hasattr(self, 'peak_wlen_spin') else 0
+        peak_rel_height_val = self.peak_rel_height_spin.value() if hasattr(self, 'peak_rel_height_spin') else 0.0
+        
         return {
             'peak_detection_enabled': self.peak_check.isChecked() if hasattr(self, 'peak_check') else False,
             'peak_height_threshold': self.peak_height_spin.value() if hasattr(self, 'peak_height_spin') else 0.0,
             'peak_distance_min': self.peak_distance_spin.value() if hasattr(self, 'peak_distance_spin') else 0,
-            'peak_prominence': self.peak_prominence_spin.value() if hasattr(self, 'peak_prominence_spin') else 0.0,
-            'peak_width': self.peak_width_spin.value() if hasattr(self, 'peak_width_spin') else 0.0,
-            'peak_wlen': self.peak_wlen_spin.value() if hasattr(self, 'peak_wlen_spin') else 0,
-            'peak_rel_height': self.peak_rel_height_spin.value() if hasattr(self, 'peak_rel_height_spin') else 0.0,
+            'peak_prominence': peak_prominence_val if peak_prominence_val > 0 else None,
+            'peak_width': peak_width_val if peak_width_val > 0 else None,
+            'peak_wlen': peak_wlen_val if peak_wlen_val > 0 else None,
+            'peak_rel_height': peak_rel_height_val if peak_rel_height_val > 0 else None,
             'peak_show_label': self.peak_show_label_check.isChecked() if hasattr(self, 'peak_show_label_check') else True,
             'peak_label_font': self.peak_label_font_combo.currentText() if hasattr(self, 'peak_label_font_combo') else 'Times New Roman',
             'peak_label_size': self.peak_label_size_spin.value() if hasattr(self, 'peak_label_size_spin') else 10,

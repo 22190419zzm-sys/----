@@ -1,4 +1,5 @@
 import sys
+import os
 import warnings
 import traceback
 
@@ -7,20 +8,29 @@ warnings.filterwarnings('ignore', category=DeprecationWarning, message='.*sipPyT
 
 # 首先只导入最基础的PyQt6模块，确保启动画面能立即显示
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QRect
+from PyQt6.QtGui import QColor, QPainter, QPainterPath, QLinearGradient
 
 
 def main():
     # 立即创建应用程序（不导入其他模块）
     app = QApplication(sys.argv)
     
+    # 设置应用程序图标（影响所有窗口）
+    try:
+        from src.utils.icon_manager import set_application_icon
+        set_application_icon(app)
+    except Exception as e:
+        print(f"警告: 无法加载应用程序图标: {e}")
+    
     # 立即显示启动画面（使用最少的导入）
     # 直接创建启动画面窗口，不通过导入
     from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QProgressBar
-    from PyQt6.QtGui import QFont
+    from PyQt6.QtGui import QFont, QPixmap, QPainter, QPainterPath
+    from PyQt6.QtCore import QRect
     
     class SplashScreen(QWidget):
-        """启动画面窗口"""
+        """启动画面窗口 - 炫酷版本"""
         
         def __init__(self):
             super().__init__()
@@ -30,64 +40,144 @@ def main():
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             
-            # 设置窗口大小和位置
-            self.setFixedSize(500, 200)
+            # 设置窗口大小和位置（增大尺寸以容纳logo）
+            self.setFixedSize(600, 400)
             self._center_window()
+            
+            # 尝试加载logo
+            self.logo_pixmap = None
+            try:
+                from src.utils.icon_manager import get_resource_path
+                logo_path = get_resource_path("resources/splash_logo.png")
+                if logo_path and os.path.exists(logo_path):
+                    self.logo_pixmap = QPixmap(logo_path)
+                    # 缩放logo到合适大小（最大200x200）
+                    if self.logo_pixmap.width() > 200 or self.logo_pixmap.height() > 200:
+                        self.logo_pixmap = self.logo_pixmap.scaled(200, 200, 
+                                                                    Qt.AspectRatioMode.KeepAspectRatio,
+                                                                    Qt.TransformationMode.SmoothTransformation)
+            except Exception as e:
+                print(f"警告: 无法加载启动画面logo: {e}")
             
             # 创建布局
             layout = QVBoxLayout(self)
             layout.setSpacing(20)
-            layout.setContentsMargins(30, 30, 30, 30)
+            layout.setContentsMargins(40, 40, 40, 40)
             
-            # 标题标签
-            self.title_label = QLabel("白皓正在为你打开软件")
-            title_font = QFont()
-            title_font.setPointSize(16)
-            title_font.setBold(True)
-            self.title_label.setFont(title_font)
-            self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.title_label.setStyleSheet("color: #2c3e50;")
-            layout.addWidget(self.title_label)
+            # Logo标签（悬空显示，无背景）
+            if self.logo_pixmap:
+                self.logo_label = QLabel()
+                self.logo_label.setPixmap(self.logo_pixmap)
+                self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.logo_label.setStyleSheet("background: transparent; border: none;")
+                layout.addWidget(self.logo_label)
+            else:
+                # 如果没有logo，尝试显示应用程序图标
+                try:
+                    from src.utils.icon_manager import get_app_icon
+                    icon = get_app_icon()
+                    if icon and not icon.isNull():
+                        icon_label = QLabel()
+                        pixmap = icon.pixmap(200, 200)
+                        if not pixmap.isNull():
+                            icon_label.setPixmap(pixmap)
+                            icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                            icon_label.setStyleSheet("background: transparent; border: none;")
+                            layout.addWidget(icon_label)
+                except Exception as e:
+                    print(f"警告: 无法加载图标: {e}")
             
-            # 状态标签
+            # 添加弹性空间，让logo和进度条之间有间距
+            layout.addStretch()
+            
+            # 状态标签（隐藏，仅用于存储状态文字，不显示）
             self.status_label = QLabel("正在初始化...")
-            status_font = QFont()
-            status_font.setPointSize(11)
-            self.status_label.setFont(status_font)
-            self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.status_label.setStyleSheet("color: #34495e;")
-            layout.addWidget(self.status_label)
+            self.status_label.hide()  # 隐藏状态标签，文字融合到进度条中
             
-            # 进度条（只保留一个进度条，不再单独显示百分比标签）
+            # 进度条（科技风格，状态文字融合在其中）
             self.progress_bar = QProgressBar()
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
-            self.progress_bar.setFormat("%p%")  # 在进度条内部显示百分比文字
+            self.progress_bar.setFormat("正在初始化... - %p%")  # 初始格式：状态文字 + 百分比
             self.progress_bar.setStyleSheet("""
                 QProgressBar {
-                    border: 2px solid #bdc3c7;
-                    border-radius: 5px;
+                    border: 2px solid qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0,
+                        stop: 0 rgba(0, 212, 255, 0.5), stop: 1 rgba(123, 104, 238, 0.5));
+                    border-radius: 12px;
                     text-align: center;
-                    background-color: #ecf0f1;
-                    height: 25px;
+                    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                        stop: 0 rgba(10, 14, 39, 0.95), stop: 1 rgba(22, 33, 62, 0.95));
+                    height: 45px;
+                    font-size: 11px;
+                    font-weight: bold;
+                    color: #00d4ff;
+                    padding: 8px;
                 }
                 QProgressBar::chunk {
-                    background-color: #3498db;
-                    border-radius: 3px;
+                    background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0,
+                        stop: 0 #00d4ff, stop: 0.3 #4a90e2, stop: 0.6 #7b68ee, stop: 1 #00d4ff);
+                    border-radius: 10px;
+                    border: 1px solid rgba(0, 212, 255, 0.6);
                 }
             """)
             layout.addWidget(self.progress_bar)
             
-            # 设置窗口样式
+            # 设置窗口样式（科技感深色背景，带渐变和发光效果）
             self.setStyleSheet("""
                 QWidget {
-                    background-color: white;
-                    border-radius: 10px;
+                    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                        stop: 0 #0a0e27, 
+                        stop: 0.5 #1a1f3a,
+                        stop: 1 #0f1419);
+                    border-radius: 15px;
+                    border: 1px solid rgba(0, 212, 255, 0.3);
                 }
             """)
             
             # 加载步骤列表
             self.loading_steps = []
+        
+        def paintEvent(self, event):
+            """绘制窗口（科技风格，带发光效果）"""
+            from PyQt6.QtCore import QRectF
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            # 绘制外发光阴影（科技感）
+            shadow_rect = QRectF(3, 3, self.width() - 6, self.height() - 6)
+            shadow_path = QPainterPath()
+            shadow_path.addRoundedRect(shadow_rect, 15, 15)
+            # 多层阴影创造发光效果
+            for i in range(3):
+                alpha = 20 - i * 5
+                shadow_color = QColor(0, 212, 255, alpha)
+                painter.setPen(QColor(0, 0, 0, 0))
+                painter.setBrush(shadow_color)
+                offset = i * 2
+                glow_rect = QRectF(3 - offset, 3 - offset, 
+                                  self.width() - 6 + offset * 2, 
+                                  self.height() - 6 + offset * 2)
+                glow_path = QPainterPath()
+                glow_path.addRoundedRect(glow_rect, 15, 15)
+                painter.drawPath(glow_path)
+            
+            # 绘制主窗口（深色科技背景，带渐变）
+            main_rect = QRectF(0, 0, self.width() - 3, self.height() - 3)
+            path = QPainterPath()
+            path.addRoundedRect(main_rect, 15, 15)
+            # 使用深色渐变背景
+            from PyQt6.QtGui import QLinearGradient
+            gradient = QLinearGradient(0, 0, 0, self.height())
+            gradient.setColorAt(0, QColor(10, 14, 39))
+            gradient.setColorAt(0.5, QColor(26, 26, 46))
+            gradient.setColorAt(1, QColor(22, 33, 62))
+            painter.fillPath(path, gradient)
+            
+            # 绘制顶部边框发光效果
+            border_color = QColor(0, 212, 255, 150)
+            painter.setPen(border_color)
+            painter.setBrush(QColor(0, 0, 0, 0))
+            painter.drawPath(path)
         
         def _center_window(self):
             """居中显示窗口"""
@@ -107,12 +197,22 @@ def main():
             if step_index < len(self.loading_steps):
                 if status_text is None:
                     status_text = self.loading_steps[step_index]
+                # 保存状态文字（虽然标签已隐藏）
                 self.status_label.setText(status_text)
-            
-            # 计算进度百分比
-            if len(self.loading_steps) > 0:
-                progress = int((step_index + 1) / len(self.loading_steps) * 100)
-                self.progress_bar.setValue(progress)
+                
+                # 计算进度百分比
+                if len(self.loading_steps) > 0:
+                    progress = int((step_index + 1) / len(self.loading_steps) * 100)
+                    self.progress_bar.setValue(progress)
+                    # 进度条格式：状态文字 + 百分比（融合在一起）
+                    self.progress_bar.setFormat(f"{status_text} - %p%")
+            else:
+                # 计算进度百分比
+                if len(self.loading_steps) > 0:
+                    progress = int((step_index + 1) / len(self.loading_steps) * 100)
+                    self.progress_bar.setValue(progress)
+                    if status_text:
+                        self.progress_bar.setFormat(f"{status_text} - %p%")
             
             # 强制更新界面
             QApplication.processEvents()

@@ -46,6 +46,7 @@ class PublicationStyleConfig:
     # Grid
     show_grid: bool = True
     grid_alpha: float = 0.2
+    show_shadow: bool = True  # 是否显示阴影
     shadow_alpha: float = 0.25
     
     # Spines
@@ -113,6 +114,7 @@ class PeakDetectionConfig:
     label_rotation: float = 0.0
     marker_shape: str = 'v'
     marker_size: int = 8
+    marker_color: str = ''  # 标记颜色（空字符串表示使用线条颜色）
 
 
 @dataclass
@@ -192,6 +194,7 @@ class PlotConfig:
                 'tick_width': self.publication_style.tick_width,
                 'show_grid': self.publication_style.show_grid,
                 'grid_alpha': self.publication_style.grid_alpha,
+                'show_shadow': self.publication_style.show_shadow,
                 'shadow_alpha': self.publication_style.shadow_alpha,
                 'spine_top': self.publication_style.spine_top,
                 'spine_bottom': self.publication_style.spine_bottom,
@@ -330,6 +333,7 @@ class PlotConfigManager:
         ps.tick_width = float(self.settings.value("plot_config/tick_width", ps.tick_width))
         ps.show_grid = self.settings.value("plot_config/show_grid", ps.show_grid, type=bool)
         ps.grid_alpha = float(self.settings.value("plot_config/grid_alpha", ps.grid_alpha))
+        ps.show_shadow = self.settings.value("plot_config/show_shadow", ps.show_shadow, type=bool)
         ps.shadow_alpha = float(self.settings.value("plot_config/shadow_alpha", ps.shadow_alpha))
         ps.spine_top = self.settings.value("plot_config/spine_top", ps.spine_top, type=bool)
         ps.spine_bottom = self.settings.value("plot_config/spine_bottom", ps.spine_bottom, type=bool)
@@ -368,18 +372,25 @@ class PlotConfigManager:
         pd.enabled = self.settings.value("plot_config/peak_detection_enabled", pd.enabled, type=bool)
         pd.height_threshold = float(self.settings.value("plot_config/peak_height_threshold", pd.height_threshold))
         pd.distance_min = int(self.settings.value("plot_config/peak_distance_min", pd.distance_min))
-        pd.prominence = self.settings.value("plot_config/peak_prominence", pd.prominence)
-        if pd.prominence is not None:
-            pd.prominence = float(pd.prominence)
-        pd.width = self.settings.value("plot_config/peak_width", pd.width)
-        if pd.width is not None:
-            pd.width = float(pd.width)
-        pd.wlen = self.settings.value("plot_config/peak_wlen", pd.wlen)
-        if pd.wlen is not None:
-            pd.wlen = int(pd.wlen)
-        pd.rel_height = self.settings.value("plot_config/peak_rel_height", pd.rel_height)
-        if pd.rel_height is not None:
-            pd.rel_height = float(pd.rel_height)
+        prominence_val = self.settings.value("plot_config/peak_prominence", pd.prominence if pd.prominence is not None else 0.0)
+        pd.prominence = float(prominence_val) if prominence_val is not None and float(prominence_val) > 0 else None
+        width_val = self.settings.value("plot_config/peak_width", pd.width if pd.width is not None else 0.0)
+        pd.width = float(width_val) if width_val is not None and float(width_val) > 0 else None
+        wlen_val = self.settings.value("plot_config/peak_wlen", pd.wlen if pd.wlen is not None else 0)
+        pd.wlen = int(wlen_val) if wlen_val is not None and int(wlen_val) > 0 else None
+        rel_height_val = self.settings.value("plot_config/peak_rel_height", pd.rel_height if pd.rel_height is not None else 0.0)
+        pd.rel_height = float(rel_height_val) if rel_height_val is not None and float(rel_height_val) > 0 else None
+        # 加载峰值显示参数
+        pd.show_label = self.settings.value("plot_config/peak_show_label", pd.show_label, type=bool)
+        pd.label_font = str(self.settings.value("plot_config/peak_label_font", pd.label_font))
+        pd.label_size = int(self.settings.value("plot_config/peak_label_size", pd.label_size))
+        pd.label_color = str(self.settings.value("plot_config/peak_label_color", pd.label_color))
+        pd.label_bold = self.settings.value("plot_config/peak_label_bold", pd.label_bold, type=bool)
+        pd.label_rotation = float(self.settings.value("plot_config/peak_label_rotation", pd.label_rotation))
+        pd.marker_shape = str(self.settings.value("plot_config/peak_marker_shape", pd.marker_shape))
+        pd.marker_size = int(self.settings.value("plot_config/peak_marker_size", pd.marker_size))
+        marker_color_val = self.settings.value("plot_config/peak_marker_color", pd.marker_color if hasattr(pd, 'marker_color') and pd.marker_color else "")
+        pd.marker_color = str(marker_color_val) if marker_color_val else ""
         
         # 加载峰值匹配
         pm = self.config.peak_matching
@@ -429,6 +440,7 @@ class PlotConfigManager:
         self.settings.setValue("plot_config/tick_width", ps.tick_width)
         self.settings.setValue("plot_config/show_grid", ps.show_grid)
         self.settings.setValue("plot_config/grid_alpha", ps.grid_alpha)
+        self.settings.setValue("plot_config/show_shadow", ps.show_shadow)
         self.settings.setValue("plot_config/shadow_alpha", ps.shadow_alpha)
         self.settings.setValue("plot_config/spine_top", ps.spine_top)
         self.settings.setValue("plot_config/spine_bottom", ps.spine_bottom)
@@ -467,10 +479,20 @@ class PlotConfigManager:
         self.settings.setValue("plot_config/peak_detection_enabled", pd.enabled)
         self.settings.setValue("plot_config/peak_height_threshold", pd.height_threshold)
         self.settings.setValue("plot_config/peak_distance_min", pd.distance_min)
-        self.settings.setValue("plot_config/peak_prominence", pd.prominence)
-        self.settings.setValue("plot_config/peak_width", pd.width)
-        self.settings.setValue("plot_config/peak_wlen", pd.wlen)
-        self.settings.setValue("plot_config/peak_rel_height", pd.rel_height)
+        self.settings.setValue("plot_config/peak_prominence", pd.prominence if pd.prominence is not None else 0.0)
+        self.settings.setValue("plot_config/peak_width", pd.width if pd.width is not None else 0.0)
+        self.settings.setValue("plot_config/peak_wlen", pd.wlen if pd.wlen is not None else 0)
+        self.settings.setValue("plot_config/peak_rel_height", pd.rel_height if pd.rel_height is not None else 0.0)
+        # 峰值显示参数
+        self.settings.setValue("plot_config/peak_show_label", pd.show_label)
+        self.settings.setValue("plot_config/peak_label_font", pd.label_font)
+        self.settings.setValue("plot_config/peak_label_size", pd.label_size)
+        self.settings.setValue("plot_config/peak_label_color", pd.label_color)
+        self.settings.setValue("plot_config/peak_label_bold", pd.label_bold)
+        self.settings.setValue("plot_config/peak_label_rotation", pd.label_rotation)
+        self.settings.setValue("plot_config/peak_marker_shape", pd.marker_shape)
+        self.settings.setValue("plot_config/peak_marker_size", pd.marker_size)
+        self.settings.setValue("plot_config/peak_marker_color", pd.marker_color if pd.marker_color else "")
         
         # 峰值匹配
         pm = self.config.peak_matching

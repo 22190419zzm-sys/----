@@ -40,6 +40,12 @@ class BatchPlotWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Batch Plot - Spectrum with Microscopy Image")
+        # 设置窗口图标
+        try:
+            from src.utils.icon_manager import set_window_icon
+            set_window_icon(self)
+        except:
+            pass
         # 使用Window类型而不是Dialog，这样最小化后能显示窗口名称
         self.setWindowFlags(
             Qt.WindowType.Window |
@@ -79,7 +85,63 @@ class BatchPlotWindow(QDialog):
         # 匹配结果缓存（本次运行期间）
         self._match_cache = {}  # {cache_key: {'single': [...], 'combo': [...]}}
         
+        # 当前选中的文件（用于自动更新）
+        self._current_selected_files = []
+        
+        # 初始化自动更新定时器
+        self._style_update_timer = None
+        self._setup_auto_update()
+        
         self.setup_ui()
+        
+        # 加载保存的设置（文件夹、文件列表、数据库）
+        self._load_file_list()
+        self._load_database_settings()
+    
+    def _setup_auto_update(self):
+        """设置自动更新功能（监听主窗口样式参数变化）"""
+        from PyQt6.QtCore import QTimer
+        if self._style_update_timer is None:
+            self._style_update_timer = QTimer()
+            self._style_update_timer.setSingleShot(True)
+            self._style_update_timer.timeout.connect(self._on_style_params_changed)
+    
+    def _on_style_params_changed(self):
+        """当主窗口样式参数改变时，自动更新当前显示的绘图"""
+        if not self.isVisible():
+            return
+        
+            # 获取当前选中的文件
+            selected_items = self.file_list.selectedItems()
+            if not selected_items:
+                # 如果没有选中文件，不清空界面，保持当前显示
+                return
+            
+            # 更新当前显示的绘图（确保RRUFF数据正确传递）
+            try:
+                if len(selected_items) == 1:
+                    basename = os.path.splitext(selected_items[0].text())[0]
+                    # 确保RRUFF数据已准备好
+                    if self.rruff_loader and basename not in self.rruff_match_results:
+                        # 如果还没有匹配结果，尝试执行自动匹配
+                        if hasattr(self, "auto_rruff_match_check") and self.auto_rruff_match_check.isChecked():
+                            self._auto_match_rruff_for_file(basename)
+                            self._auto_match_rruff_combination_for_file(basename)
+                    self.plot_single_spectrum(basename)
+                else:
+                    basenames = [os.path.splitext(item.text())[0] for item in selected_items]
+                    # 确保RRUFF数据已准备好
+                    if self.rruff_loader:
+                        for basename in basenames:
+                            if basename not in self.rruff_match_results:
+                                if hasattr(self, "auto_rruff_match_check") and self.auto_rruff_match_check.isChecked():
+                                    self._auto_match_rruff_for_file(basename)
+                                    self._auto_match_rruff_combination_for_file(basename)
+                    self.plot_multiple_spectra(basenames)
+            except Exception as e:
+                print(f"自动更新批量绘图失败: {e}")
+                import traceback
+                traceback.print_exc()
     
     def setup_ui(self):
         """设置UI界面"""
@@ -252,43 +314,103 @@ class BatchPlotWindow(QDialog):
         # RRUFF 结果总览窗口（懒加载）
         self.rruff_summary_window = None
     
+    def _safe_get_widget_value(self, attr_name, getter_func, default_value):
+        """安全获取控件值"""
+        if hasattr(self.parent_window, attr_name):
+            widget = getattr(self.parent_window, attr_name)
+            if widget is not None:
+                try:
+                    return getter_func(widget)
+                except:
+                    return default_value
+        return default_value
+    
     def get_parent_plot_params(self):
-        """从主窗口获取绘图参数"""
+        """从主窗口获取绘图参数（兼容 main_window 和 classification_window 两种类型）"""
         if not self.parent_window:
             return None
         
         try:
             # 物理截断值
-            x_min_phys = self.parent_window._parse_optional_float(
-                self.parent_window.x_min_phys_input.text()
-            )
-            x_max_phys = self.parent_window._parse_optional_float(
-                self.parent_window.x_max_phys_input.text()
-            )
+            x_min_phys = None
+            x_max_phys = None
+            if hasattr(self.parent_window, 'x_min_phys_input') and hasattr(self.parent_window, '_parse_optional_float'):
+                x_min_phys = self.parent_window._parse_optional_float(
+                    self.parent_window.x_min_phys_input.text()
+                )
+                x_max_phys = self.parent_window._parse_optional_float(
+                    self.parent_window.x_max_phys_input.text()
+                )
             
             # 从面板获取配置（如果可用）
             config = None
             ps = None
+            ss = None  # spectrum_scan
             if hasattr(self.parent_window, 'publication_style_panel') and self.parent_window.publication_style_panel:
                 config = self.parent_window.publication_style_panel.get_config()
                 ps = config.publication_style
-            elif not ps:
+                ss = config.spectrum_scan
+            else:
                 # 从配置管理器获取
                 from src.core.plot_config_manager import PlotConfigManager
                 config_manager = PlotConfigManager()
                 config = config_manager.get_config()
                 ps = config.publication_style
+                ss = config.spectrum_scan
             
-            # 收集参数（复用主窗口的run_plot_logic逻辑）
+            # 安全获取各种参数值
+            # plot_mode
+            plot_mode = self._safe_get_widget_value('plot_mode_combo', lambda w: w.currentText(), 'Normal Overlay')
+            
+            # show_y_values：优先从控件获取，否则从样式面板获取
+            show_y_values = True
+            if hasattr(self.parent_window, 'show_y_val_check'):
+                show_y_values = self.parent_window.show_y_val_check.isChecked()
+            elif ps and hasattr(ps, 'show_y_values'):
+                show_y_values = ps.show_y_values
+            
+            # is_derivative：main_window 中已删除，总是 False；classification_window 中有控件
+            is_derivative = False
+            if hasattr(self.parent_window, 'derivative_check'):
+                is_derivative = self.parent_window.derivative_check.isChecked()
+            
+            # x_axis_invert：优先从控件获取，否则从样式面板获取
+            x_axis_invert = False
+            if hasattr(self.parent_window, 'x_axis_invert_check'):
+                x_axis_invert = self.parent_window.x_axis_invert_check.isChecked()
+            elif ps and hasattr(ps, 'x_axis_invert'):
+                x_axis_invert = ps.x_axis_invert
+            
+            # global_stack_offset：优先从谱线扫描面板获取（这是最新的参数来源），然后尝试控件，最后使用默认值
+            global_stack_offset = 0.5
+            # 1. 优先从谱线扫描面板获取（这是最新的参数来源）
+            if ss and hasattr(ss, 'stack_offset'):
+                global_stack_offset = ss.stack_offset
+            # 2. 尝试从主窗口的方法获取
+            elif hasattr(self.parent_window, '_get_stack_offset_from_panel'):
+                try:
+                    global_stack_offset = self.parent_window._get_stack_offset_from_panel()
+                except:
+                    pass
+            # 3. 最后尝试从控件获取（向后兼容）
+            elif hasattr(self.parent_window, 'global_stack_offset_spin'):
+                global_stack_offset = self.parent_window.global_stack_offset_spin.value()
+            
+            # global_scale_factor
+            global_scale_factor = self._safe_get_widget_value('global_y_scale_factor_spin', lambda w: w.value(), 1.0)
+            
+            # plot_style
+            plot_style = self._safe_get_widget_value('plot_style_combo', lambda w: w.currentText(), 'line')
+            
             params = {
                 # 模式与全局
-                'plot_mode': self.parent_window.plot_mode_combo.currentText(),
-                'show_y_values': self.parent_window.show_y_val_check.isChecked(),
-                'is_derivative': self.parent_window.derivative_check.isChecked(),
-                'x_axis_invert': self.parent_window.x_axis_invert_check.isChecked(),
-                'global_stack_offset': self.parent_window.global_stack_offset_spin.value(),
-                'global_scale_factor': self.parent_window.global_y_scale_factor_spin.value(),
-                'plot_style': self.parent_window.plot_style_combo.currentText(),
+                'plot_mode': plot_mode,
+                'show_y_values': show_y_values,
+                'is_derivative': is_derivative,
+                'x_axis_invert': x_axis_invert,
+                'global_stack_offset': global_stack_offset,
+                'global_scale_factor': global_scale_factor,
+                'plot_style': plot_style,
                 
                 # 标题和轴标签（从面板获取）
                 'main_title_text': ps.title_text if ps else "",
@@ -305,88 +427,156 @@ class BatchPlotWindow(QDialog):
                 'ylabel_show': ps.ylabel_show if ps else True,
                 
                 # 预处理
-                'skip_rows': self.parent_window.skip_rows_spin.value(),
-                'qc_enabled': self.parent_window.qc_check.isChecked(),
-                'qc_threshold': self.parent_window.qc_threshold_spin.value(),
-                'is_baseline_als': self.parent_window.baseline_als_check.isChecked(),
-                'als_lam': self.parent_window.lam_spin.value(),
-                'als_p': self.parent_window.p_spin.value(),
+                'skip_rows': self._safe_get_widget_value('skip_rows_spin', lambda w: w.value(), 0),
+                'qc_enabled': self._safe_get_widget_value('qc_check', lambda w: w.isChecked(), False),
+                'qc_threshold': self._safe_get_widget_value('qc_threshold_spin', lambda w: w.value(), 5.0),
+                'is_baseline_als': self._safe_get_widget_value('baseline_als_check', lambda w: w.isChecked(), False),
+                'als_lam': self._safe_get_widget_value('lam_spin', lambda w: w.value(), 10000),
+                'als_p': self._safe_get_widget_value('p_spin', lambda w: w.value(), 0.005),
                 'is_baseline': False,
                 'baseline_points': 50,
                 'baseline_poly': 3,
-                'is_smoothing': self.parent_window.smoothing_check.isChecked(),
-                'smoothing_window': self.parent_window.smoothing_window_spin.value(),
-                'smoothing_poly': self.parent_window.smoothing_poly_spin.value(),
-                'normalization_mode': self.parent_window.normalization_combo.currentText(),
+                'is_smoothing': self._safe_get_widget_value('smoothing_check', lambda w: w.isChecked(), False),
+                'smoothing_window': self._safe_get_widget_value('smoothing_window_spin', lambda w: w.value(), 5),
+                'smoothing_poly': self._safe_get_widget_value('smoothing_poly_spin', lambda w: w.value(), 3),
+                'normalization_mode': self._safe_get_widget_value('normalization_combo', lambda w: w.currentText(), 'None'),
                 
                 # Bose-Einstein
-                'is_be_correction': self.parent_window.be_check.isChecked(),
-                'be_temp': self.parent_window.be_temp_spin.value(),
+                'is_be_correction': self._safe_get_widget_value('be_check', lambda w: w.isChecked(), False),
+                'be_temp': self._safe_get_widget_value('be_temp_spin', lambda w: w.value(), 300.0),
                 
                 # 全局动态变换
-                'global_transform_mode': self.parent_window.global_transform_combo.currentText(),
-                'global_log_base': self.parent_window.global_log_base_combo.currentText(),
-                'global_log_offset': self.parent_window.global_log_offset_spin.value(),
-                'global_sqrt_offset': self.parent_window.global_sqrt_offset_spin.value(),
-                'global_y_offset': self.parent_window.global_y_offset_spin.value() if hasattr(self.parent_window, 'global_y_offset_spin') else 0.0,
-                
-                # 峰值检测
-                'peak_detection_enabled': self.parent_window.peak_check.isChecked(),
-                'peak_height_threshold': self.parent_window.peak_height_spin.value(),
-                'peak_distance_min': self.parent_window.peak_distance_spin.value(),
-                'peak_prominence': self.parent_window.peak_prominence_spin.value(),
-                'peak_width': self.parent_window.peak_width_spin.value(),
-                'peak_wlen': self.parent_window.peak_wlen_spin.value(),
-                'peak_rel_height': self.parent_window.peak_rel_height_spin.value(),
-                'peak_show_label': self.parent_window.peak_show_label_check.isChecked(),
-                'peak_label_font': self.parent_window.peak_label_font_combo.currentText(),
-                'peak_label_size': self.parent_window.peak_label_size_spin.value(),
-                'peak_label_color': self.parent_window.peak_label_color_input.text().strip() or 'black',
-                'peak_label_bold': self.parent_window.peak_label_bold_check.isChecked(),
-                'peak_label_rotation': self.parent_window.peak_label_rotation_spin.value(),
-                'peak_marker_shape': self.parent_window.peak_marker_shape_combo.currentText(),
-                'peak_marker_size': self.parent_window.peak_marker_size_spin.value(),
-                'peak_marker_color': self.parent_window.peak_marker_color_input.text().strip() or '',
-                'vertical_lines': self.parent_window.parse_list_input(self.parent_window.vertical_lines_input.toPlainText()) if hasattr(self.parent_window, 'vertical_lines_input') else [],
-                'vertical_line_color': self.parent_window.vertical_line_color_input.text().strip() or 'gray' if hasattr(self.parent_window, 'vertical_line_color_input') else 'gray',
-                'vertical_line_width': self.parent_window.vertical_line_width_spin.value() if hasattr(self.parent_window, 'vertical_line_width_spin') else 0.8,
-                'vertical_line_style': self.parent_window.vertical_line_style_combo.currentText() if hasattr(self.parent_window, 'vertical_line_style_combo') else ':',
-                'vertical_line_alpha': self.parent_window.vertical_line_alpha_spin.value() if hasattr(self.parent_window, 'vertical_line_alpha_spin') else 0.7,
-                'rruff_ref_lines_enabled': self.rruff_ref_lines_enabled_check.isChecked() if hasattr(self, 'rruff_ref_lines_enabled_check') else True,
-                'rruff_ref_line_offset': self.rruff_ref_line_offset_spin.value() if hasattr(self, 'rruff_ref_line_offset_spin') else 0.0,
-                
-                # 样式参数（从面板获取）
-                'fig_width': ps.fig_width if ps else 10.0,
-                'fig_height': ps.fig_height if ps else 6.0,
-                'fig_dpi': ps.fig_dpi if ps else 300,
-                'font_family': ps.font_family if ps else 'Times New Roman',
-                'axis_title_fontsize': ps.axis_title_fontsize if ps else 20,
-                'tick_label_fontsize': ps.tick_label_fontsize if ps else 16,
-                'legend_fontsize': ps.legend_fontsize if ps else 10,
-                'line_width': ps.line_width if ps else 1.2,
-                'line_style': ps.line_style if ps else '-',
-                'tick_direction': ps.tick_direction if ps else 'in',
-                'tick_len_major': ps.tick_len_major if ps else 8,
-                'tick_len_minor': ps.tick_len_minor if ps else 4,
-                'tick_width': ps.tick_width if ps else 1.0,
-                'show_grid': ps.show_grid if ps else True,
-                'grid_alpha': ps.grid_alpha if ps else 0.2,
-                'shadow_alpha': ps.shadow_alpha if ps else 0.25,
-                'show_legend': ps.show_legend if ps else True,
-                'legend_frame': ps.legend_frame if ps else True,
-                'legend_loc': ps.legend_loc if ps else 'best',
-                'legend_ncol': ps.legend_ncol if ps else 1,
-                'legend_columnspacing': ps.legend_columnspacing if ps else 2.0,
-                'legend_labelspacing': ps.legend_labelspacing if ps else 0.5,
-                'legend_handlelength': ps.legend_handlelength if ps else 2.0,
-                'border_sides': self.parent_window._get_border_sides_from_config(ps) if ps and hasattr(self.parent_window, '_get_border_sides_from_config') else (self.parent_window.get_checked_border_sides() if hasattr(self.parent_window, 'get_checked_border_sides') else ['top', 'right', 'left', 'bottom']),
-                'border_linewidth': ps.spine_width if ps else 2.0,
-                'aspect_ratio': ps.aspect_ratio if ps else 0.6,
-                
-                # 物理截断
-                'x_min_phys': x_min_phys,
-                'x_max_phys': x_max_phys,
+                'global_transform_mode': self._safe_get_widget_value('global_transform_combo', lambda w: w.currentText(), '无'),
+                'global_log_base': self._safe_get_widget_value('global_log_base_combo', lambda w: w.currentText(), '10'),
+                'global_log_offset': self._safe_get_widget_value('global_log_offset_spin', lambda w: w.value() if hasattr(w, 'value') else float(w.text()) if hasattr(w, 'text') else 1.0, 1.0),
+                'global_sqrt_offset': self._safe_get_widget_value('global_sqrt_offset_spin', lambda w: w.value() if hasattr(w, 'value') else float(w.text()) if hasattr(w, 'text') else 0.0, 0.0),
+                'global_y_offset': self._safe_get_widget_value('global_y_offset_spin', lambda w: w.value(), 0.0),
             }
+            
+            # 峰值检测（优先从样式与匹配面板获取，否则从主窗口控件获取）
+            peak_detection_config = None
+            if self.parent_window and hasattr(self.parent_window, 'peak_detection_panel') and self.parent_window.peak_detection_panel:
+                try:
+                    config = self.parent_window.peak_detection_panel.get_config()
+                    peak_detection_config = config.peak_detection if config else None
+                except:
+                    pass
+            
+            if peak_detection_config:
+                # 从样式与匹配面板获取峰值检测参数
+                peak_params = {
+                    'peak_detection_enabled': peak_detection_config.enabled,
+                    'peak_height_threshold': peak_detection_config.height_threshold,
+                    'peak_distance_min': peak_detection_config.distance_min,
+                    'peak_prominence': peak_detection_config.prominence,
+                    'peak_width': peak_detection_config.width,
+                    'peak_wlen': peak_detection_config.wlen,
+                    'peak_rel_height': peak_detection_config.rel_height,
+                    'peak_show_label': peak_detection_config.show_label,
+                    'peak_label_font': peak_detection_config.label_font,
+                    'peak_label_size': peak_detection_config.label_size,
+                    'peak_label_color': peak_detection_config.label_color,
+                    'peak_label_bold': peak_detection_config.label_bold,
+                    'peak_label_rotation': peak_detection_config.label_rotation,
+                    'peak_marker_shape': peak_detection_config.marker_shape,
+                    'peak_marker_size': peak_detection_config.marker_size,
+                    'peak_marker_color': peak_detection_config.marker_color or '',
+                }
+            else:
+                # 从主窗口控件获取（向后兼容）
+                peak_params = {
+                    'peak_detection_enabled': self._safe_get_widget_value('peak_check', lambda w: w.isChecked(), False),
+                    'peak_height_threshold': self._safe_get_widget_value('peak_height_spin', lambda w: w.value(), 0.1),
+                    'peak_distance_min': self._safe_get_widget_value('peak_distance_spin', lambda w: w.value(), 5),
+                    'peak_prominence': self._safe_get_widget_value('peak_prominence_spin', lambda w: w.value(), 0.1),
+                    'peak_width': self._safe_get_widget_value('peak_width_spin', lambda w: w.value(), 0),
+                    'peak_wlen': self._safe_get_widget_value('peak_wlen_spin', lambda w: w.value(), None),
+                    'peak_rel_height': self._safe_get_widget_value('peak_rel_height_spin', lambda w: w.value(), 0.5),
+                    'peak_show_label': self._safe_get_widget_value('peak_show_label_check', lambda w: w.isChecked(), True),
+                    'peak_label_font': self._safe_get_widget_value('peak_label_font_combo', lambda w: w.currentText(), 'Times New Roman'),
+                    'peak_label_size': self._safe_get_widget_value('peak_label_size_spin', lambda w: w.value(), 10),
+                    'peak_label_color': self._safe_get_widget_value('peak_label_color_input', lambda w: w.text().strip() or 'black', 'black'),
+                    'peak_label_bold': self._safe_get_widget_value('peak_label_bold_check', lambda w: w.isChecked(), False),
+                    'peak_label_rotation': self._safe_get_widget_value('peak_label_rotation_spin', lambda w: w.value(), 0),
+                    'peak_marker_shape': self._safe_get_widget_value('peak_marker_shape_combo', lambda w: w.currentText(), 'o'),
+                    'peak_marker_size': self._safe_get_widget_value('peak_marker_size_spin', lambda w: w.value(), 8),
+                    'peak_marker_color': self._safe_get_widget_value('peak_marker_color_input', lambda w: w.text().strip() or '', ''),
+                }
+            
+            # 将峰值检测参数添加到params
+            params.update(peak_params)
+            
+            # 垂直线参数
+            params['vertical_lines'] = self._safe_get_widget_value('vertical_lines_input', lambda w: self.parent_window.parse_list_input(w.toPlainText()) if hasattr(self.parent_window, 'parse_list_input') else [], [])
+            params['vertical_line_color'] = self._safe_get_widget_value('vertical_line_color_input', lambda w: w.text().strip() or 'gray', 'gray')
+            params['vertical_line_width'] = self._safe_get_widget_value('vertical_line_width_spin', lambda w: w.value(), 0.8)
+            params['vertical_line_style'] = self._safe_get_widget_value('vertical_line_style_combo', lambda w: w.currentText(), ':')
+            params['vertical_line_alpha'] = self._safe_get_widget_value('vertical_line_alpha_spin', lambda w: w.value(), 0.7)
+            
+            # 匹配线样式参数（用于RRUFF匹配参考线）
+            params['match_line_color'] = self._safe_get_widget_value('match_line_color_input', lambda w: w.text().strip() or 'red', 'red')
+            params['match_line_width'] = self._safe_get_widget_value('match_line_width_spin', lambda w: w.value(), 1.0)
+            params['match_line_style'] = self._safe_get_widget_value('match_line_style_combo', lambda w: w.currentText(), '--')
+            params['match_line_alpha'] = self._safe_get_widget_value('match_line_alpha_spin', lambda w: w.value(), 0.8)
+            params['rruff_ref_lines_enabled'] = self.rruff_ref_lines_enabled_check.isChecked() if hasattr(self, 'rruff_ref_lines_enabled_check') else True
+            params['rruff_ref_line_offset'] = self.rruff_ref_line_offset_spin.value() if hasattr(self, 'rruff_ref_line_offset_spin') else 0.0
+            
+            # 样式参数（从面板获取）
+            params['fig_width'] = ps.fig_width if ps else 10.0
+            params['fig_height'] = ps.fig_height if ps else 6.0
+            params['fig_dpi'] = ps.fig_dpi if ps else 300
+            params['font_family'] = ps.font_family if ps else 'Times New Roman'
+            params['axis_title_fontsize'] = ps.axis_title_fontsize if ps else 20
+            params['tick_label_fontsize'] = ps.tick_label_fontsize if ps else 16
+            params['legend_fontsize'] = ps.legend_fontsize if ps else 10
+            params['line_width'] = ps.line_width if ps else 1.2
+            params['line_style'] = ps.line_style if ps else '-'
+            params['tick_direction'] = ps.tick_direction if ps else 'in'
+            params['tick_len_major'] = ps.tick_len_major if ps else 8
+            params['tick_len_minor'] = ps.tick_len_minor if ps else 4
+            params['tick_width'] = ps.tick_width if ps else 1.0
+            params['show_grid'] = ps.show_grid if ps else True
+            params['grid_alpha'] = ps.grid_alpha if ps else 0.2
+            params['shadow_alpha'] = ps.shadow_alpha if ps else 0.25
+            params['show_legend'] = ps.show_legend if ps else True
+            params['legend_frame'] = ps.legend_frame if ps else True
+            params['legend_loc'] = ps.legend_loc if ps else 'best'
+            params['legend_ncol'] = ps.legend_ncol if ps else 1
+            params['legend_columnspacing'] = ps.legend_columnspacing if ps else 2.0
+            params['legend_labelspacing'] = ps.legend_labelspacing if ps else 0.5
+            params['legend_handlelength'] = ps.legend_handlelength if ps else 2.0
+            params['border_sides'] = self.parent_window._get_border_sides_from_config(ps) if ps and hasattr(self.parent_window, '_get_border_sides_from_config') else (self.parent_window.get_checked_border_sides() if hasattr(self.parent_window, 'get_checked_border_sides') else ['top', 'right', 'left', 'bottom'])
+            params['border_linewidth'] = ps.spine_width if ps else 2.0
+            params['aspect_ratio'] = ps.aspect_ratio if ps else 0.6
+            
+            # 谱线扫描参数（从配置获取）
+            if ss:
+                params['spectrum_scan_enabled'] = ss.enabled
+                params['stack_offset'] = ss.stack_offset
+                params['global_stack_offset'] = ss.stack_offset
+                params['individual_offsets'] = ss.individual_offsets if hasattr(ss, 'individual_offsets') else {}
+                params['custom_mappings'] = ss.custom_mappings if hasattr(ss, 'custom_mappings') else []
+            
+            # 峰值匹配连接线样式参数（从峰值匹配面板获取）
+            pm = None
+            if hasattr(self.parent_window, 'peak_matching_panel') and self.parent_window.peak_matching_panel:
+                try:
+                    config = self.parent_window.peak_matching_panel.get_config()
+                    pm = config.peak_matching if config else None
+                except:
+                    pass
+            
+            if pm:
+                params['peak_matching_show_connection_lines'] = pm.show_connection_lines if hasattr(pm, 'show_connection_lines') else False
+                params['peak_matching_connection_line_color'] = pm.connection_line_color if hasattr(pm, 'connection_line_color') else 'red'
+                params['peak_matching_connection_line_width'] = pm.connection_line_width if hasattr(pm, 'connection_line_width') else 1.0
+                params['peak_matching_connection_line_style'] = pm.connection_line_style if hasattr(pm, 'connection_line_style') else '-'
+                params['peak_matching_connection_line_alpha'] = pm.connection_line_alpha if hasattr(pm, 'connection_line_alpha') else 0.8
+                params['peak_matching_use_spectrum_color_for_connection'] = pm.use_spectrum_color_for_connection if hasattr(pm, 'use_spectrum_color_for_connection') else True
+            
+            # 物理截断
+            params['x_min_phys'] = x_min_phys
+            params['x_max_phys'] = x_max_phys
             
             return params
             
@@ -402,6 +592,10 @@ class BatchPlotWindow(QDialog):
             self.folder_path = folder
             self.folder_label.setText(f"Folder: {os.path.basename(folder)}")
             self.btn_scan.setEnabled(True)
+            # 保存文件夹路径
+            self.settings.setValue("batch_plot_folder_path", folder)
+            # 自动扫描文件
+            self.scan_files()
     
     def select_rruff_library(self):
         """选择RRUFF库文件夹（使用预处理参数和峰值检测参数，支持缓存）"""
@@ -708,6 +902,27 @@ class BatchPlotWindow(QDialog):
         
         dialog.exec()
     
+    def _load_database_settings(self):
+        """从设置加载数据库配置"""
+        # 加载保存的数据库名称
+        db_name = self.settings.value("batch_plot_rruff_db", None)
+        if db_name:
+            try:
+                # 检查数据库是否存在
+                databases = self.rruff_database.list_databases()
+                db_exists = any(db['name'] == db_name for db in databases)
+                
+                if db_exists:
+                    # 加载数据库
+                    self._load_database(db_name)
+                    self.auto_db_mode = False
+                    self.auto_db_check.setChecked(False)
+                else:
+                    # 数据库不存在，清除设置
+                    self.settings.remove("batch_plot_rruff_db")
+            except Exception as e:
+                print(f"加载保存的数据库失败: {e}")
+    
     def _load_database(self, db_name):
         """加载指定的数据库"""
         try:
@@ -718,6 +933,9 @@ class BatchPlotWindow(QDialog):
                 self.rruff_loader.preprocess_params = db_data.get('preprocess_params', {})
                 self.rruff_loader.library_spectra = db_data.get('library_spectra', {})
                 self.rruff_loader.peak_detection_params = db_data.get('peak_detection_params', {})
+                
+                # 保存数据库名称
+                self.settings.setValue("batch_plot_rruff_db", db_name)
                 
                 count = len(self.rruff_loader.library_spectra)
                 self.rruff_label.setText(f"RRUFF Library: {count} spectra ({db_name})")
@@ -850,32 +1068,44 @@ class BatchPlotWindow(QDialog):
                 traceback.print_exc()
     
     def _get_preprocess_params(self):
-        """获取当前预处理参数"""
+        """获取当前预处理参数（使用安全的参数获取方法）"""
         if not self.parent_window:
             return {}
         
         try:
+            # 使用安全的参数获取方法，避免AttributeError
+            def safe_get(attr_name, getter_func, default_value):
+                if hasattr(self.parent_window, attr_name):
+                    try:
+                        return getter_func(getattr(self.parent_window, attr_name))
+                    except:
+                        return default_value
+                return default_value
+            
             return {
-                'qc_enabled': self.parent_window.qc_check.isChecked(),
-                'qc_threshold': self.parent_window.qc_threshold_spin.value(),
-                'is_be_correction': self.parent_window.be_check.isChecked(),
-                'be_temp': self.parent_window.be_temp_spin.value(),
-                'is_smoothing': self.parent_window.smoothing_check.isChecked(),
-                'smoothing_window': self.parent_window.smoothing_window_spin.value(),
-                'smoothing_poly': self.parent_window.smoothing_poly_spin.value(),
-                'is_baseline_als': self.parent_window.baseline_als_check.isChecked(),
-                'als_lam': self.parent_window.lam_spin.value(),
-                'als_p': self.parent_window.p_spin.value(),
-                'normalization_mode': self.parent_window.normalization_combo.currentText(),
-                'global_transform_mode': self.parent_window.global_transform_combo.currentText(),
-                'global_log_base': self.parent_window.global_log_base_combo.currentText(),
-                'global_log_offset': self.parent_window.global_log_offset_spin.value(),
-                'global_sqrt_offset': self.parent_window.global_sqrt_offset_spin.value(),
-                'global_y_offset': self.parent_window.global_y_offset_spin.value() if hasattr(self.parent_window, 'global_y_offset_spin') else 0.0,
-                'is_derivative': self.parent_window.derivative_check.isChecked(),
+                'qc_enabled': safe_get('qc_check', lambda w: w.isChecked(), False),
+                'qc_threshold': safe_get('qc_threshold_spin', lambda w: w.value(), 5.0),
+                'is_be_correction': safe_get('be_check', lambda w: w.isChecked(), False),
+                'be_temp': safe_get('be_temp_spin', lambda w: w.value(), 300.0),
+                'is_smoothing': safe_get('smoothing_check', lambda w: w.isChecked(), False),
+                'smoothing_window': safe_get('smoothing_window_spin', lambda w: w.value(), 5),
+                'smoothing_poly': safe_get('smoothing_poly_spin', lambda w: w.value(), 3),
+                'is_baseline_als': safe_get('baseline_als_check', lambda w: w.isChecked(), False),
+                'als_lam': safe_get('lam_spin', lambda w: w.value() if hasattr(w, 'value') else float(w.text()) if hasattr(w, 'text') else 10000, 10000),
+                'als_p': safe_get('p_spin', lambda w: w.value() if hasattr(w, 'value') else float(w.text()) if hasattr(w, 'text') else 0.005, 0.005),
+                'normalization_mode': safe_get('normalization_combo', lambda w: w.currentText(), 'None'),
+                'global_transform_mode': safe_get('global_transform_combo', lambda w: w.currentText(), '无'),
+                'global_log_base': safe_get('global_log_base_combo', lambda w: w.currentText(), '10'),
+                'global_log_offset': safe_get('global_log_offset_spin', lambda w: w.value() if hasattr(w, 'value') else float(w.text()) if hasattr(w, 'text') else 1.0, 1.0),
+                'global_sqrt_offset': safe_get('global_sqrt_offset_spin', lambda w: w.value() if hasattr(w, 'value') else float(w.text()) if hasattr(w, 'text') else 0.0, 0.0),
+                'global_y_offset': safe_get('global_y_offset_spin', lambda w: w.value(), 0.0),
+                # 注意：derivative_check已删除，二次导数在预处理流程中应用
+                'is_derivative': False,
             }
         except Exception as e:
             print(f"Error getting preprocess params: {e}")
+            import traceback
+            traceback.print_exc()
             return {}
     
     def update_global_exclusion_list(self):
@@ -1055,11 +1285,62 @@ class BatchPlotWindow(QDialog):
                 self.file_list.addItem(item)
             
             self.btn_export_all.setEnabled(True)
-            # 不再弹出“扫描完成”的提示框
+            # 不再弹出"扫描完成"的提示框
+            
+            # 保存文件列表
+            self._save_file_list()
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to scan files: {e}")
-            traceback.print_exc()
+    
+    def _save_file_list(self):
+        """保存文件列表到设置"""
+        if hasattr(self, 'folder_path') and self.folder_path:
+            self.settings.setValue("batch_plot_folder_path", self.folder_path)
+        if self.txt_files:
+            # 保存文件路径列表（相对于文件夹路径）
+            file_names = [os.path.basename(f) for f in self.txt_files]
+            self.settings.setValue("batch_plot_txt_files", file_names)
+        if self.png_files:
+            # 保存png文件映射（只保存文件名，不保存完整路径）
+            png_mapping = {k: os.path.basename(v) for k, v in self.png_files.items()}
+            self.settings.setValue("batch_plot_png_files", png_mapping)
+    
+    def _load_file_list(self):
+        """从设置加载文件列表"""
+        # 加载文件夹路径
+        folder_path = self.settings.value("batch_plot_folder_path", "")
+        if folder_path and os.path.isdir(folder_path):
+            self.folder_path = folder_path
+            self.folder_label.setText(f"Folder: {os.path.basename(folder_path)}")
+            self.btn_scan.setEnabled(True)
+            
+            # 加载文件列表
+            file_names = self.settings.value("batch_plot_txt_files", [])
+            if file_names:
+                self.txt_files = [os.path.join(folder_path, fname) for fname in file_names 
+                                 if os.path.exists(os.path.join(folder_path, fname))]
+                
+                # 加载png文件映射
+                png_mapping = self.settings.value("batch_plot_png_files", {})
+                if png_mapping:
+                    self.png_files = {}
+                    for txt_basename, png_filename in png_mapping.items():
+                        png_path = os.path.join(folder_path, png_filename)
+                        if os.path.exists(png_path):
+                            self.png_files[txt_basename] = png_path
+                
+                # 更新文件列表显示
+                self.file_list.clear()
+                for txt_file in self.txt_files:
+                    txt_basename = os.path.splitext(os.path.basename(txt_file))[0]
+                    has_png = txt_basename in self.png_files
+                    item_text = f"{txt_basename} {'✓' if has_png else '✗'}"
+                    item = QListWidgetItem(item_text)
+                    item.setData(Qt.ItemDataRole.UserRole, txt_basename)
+                    self.file_list.addItem(item)
+                
+                self.btn_export_all.setEnabled(len(self.txt_files) > 0)
     
     def show_file_context_menu(self, position: QPoint):
         """显示文件列表的右键菜单"""
@@ -1838,15 +2119,21 @@ class BatchPlotWindow(QDialog):
     
     def _detect_and_plot_peaks(self, ax, x_data, y_detect, y_final, plot_params, color='blue'):
         """
-        通用的波峰检测和绘制函数（从MplPlotWindow移动而来）
+        通用的波峰检测和绘制函数（使用统一的峰值检测辅助函数）
         x_data: X轴数据（波数）
         y_detect: 用于检测的Y数据（去除偏移）
         y_final: 用于绘制的Y数据（包含偏移）
         plot_params: 绘图参数字典
         color: 线条颜色（用于标记颜色默认值）
         """
-        if not plot_params.get('peak_detection_enabled', False):
-            return
+        # 使用统一的峰值检测辅助函数
+        try:
+            from src.core.peak_detection_helper import detect_and_plot_peaks as unified_detect_and_plot_peaks
+            unified_detect_and_plot_peaks(ax, x_data, y_detect, y_final, plot_params, color)
+        except ImportError:
+            # 如果导入失败，使用原有的逻辑（向后兼容）
+            if not plot_params.get('peak_detection_enabled', False):
+                return
         
         # 计算数据的统计信息，用于智能调整参数
         y_max = np.max(y_detect)
@@ -2505,10 +2792,25 @@ class BatchPlotWindow(QDialog):
                         # 绘制参考线连接匹配的峰值
                         rruff_ref_lines_enabled = plot_params.get('rruff_ref_lines_enabled', True)
                         if matches and rruff_ref_lines_enabled:
-                            ref_line_color = rruff_color
-                            ref_line_style = vertical_line_style
-                            ref_line_width = vertical_line_width
-                            ref_line_alpha = vertical_line_alpha
+                            # 匹配线颜色：优先使用RRUFF光谱颜色（跟随光谱），如果用户设置了自定义颜色则使用自定义颜色
+                            use_custom_color = plot_params.get('match_line_color') and plot_params.get('match_line_color') != 'red'
+                            if use_custom_color:
+                                ref_line_color = plot_params.get('match_line_color')
+                            else:
+                                ref_line_color = rruff_color  # 默认使用RRUFF光谱颜色（跟随光谱）
+                            
+                            # 匹配线样式：优先使用用户设置的样式，否则使用虚线
+                            ref_line_style = plot_params.get('match_line_style')
+                            if ref_line_style is None or ref_line_style == '' or ref_line_style == '-':
+                                ref_line_style = '--'  # 默认使用虚线
+                            
+                            ref_line_width = plot_params.get('match_line_width')
+                            if ref_line_width is None:
+                                ref_line_width = vertical_line_width
+                            
+                            ref_line_alpha = plot_params.get('match_line_alpha')
+                            if ref_line_alpha is None:
+                                ref_line_alpha = vertical_line_alpha
                             
                             # 获取当前光谱的峰值位置并绘制参考线
                             data_items = processed_group_data if processed_group_data else []
@@ -2555,8 +2857,8 @@ class BatchPlotWindow(QDialog):
                         ax.set_ylim(new_ylim[0], new_ylim[1])
 
         ylabel_final = "2nd Derivative" if is_derivative else plot_params['ylabel_text']
-        if is_be_correction:
-             ylabel_final = f"BE Corrected {ylabel_final} @ {be_temp}K"
+        # 注意：BE校正后仍然使用样式配置中的Y轴标题，不强制修改
+        # 如果需要显示BE校正信息，可以在标题或图例中说明
 
         xlabel_fontsize = plot_params.get('xlabel_fontsize', axis_title_fontsize)
         xlabel_pad = plot_params.get('xlabel_pad', 10.0)
@@ -4274,8 +4576,7 @@ class BatchPlotWindow(QDialog):
                         if match_result:
                             plot_params['rruff_match_results'].append(match_result)
             
-            # 检测峰值（用于组合匹配的参考线）
-            from scipy.signal import find_peaks
+            # 检测峰值（用于组合匹配的参考线）- 使用统一的峰值检测函数
             # 获取txt_file路径（用于缓存）
             txt_file = None
             if txt_basename:
@@ -4284,24 +4585,30 @@ class BatchPlotWindow(QDialog):
                         txt_file = f
                         break
             y_proc_for_peaks = self._preprocess_spectrum(x, y, plot_params, file_path=txt_file)
+            
+            # 使用统一的峰值检测逻辑（与_detect_and_plot_peaks一致）
+            from scipy.signal import find_peaks
             peak_height = plot_params.get('peak_height_threshold', 0.0)
             peak_distance = plot_params.get('peak_distance_min', 10)
             peak_prominence = plot_params.get('peak_prominence', None)
+            peak_width = plot_params.get('peak_width', None)
+            peak_wlen = plot_params.get('peak_wlen', None)
+            peak_rel_height = plot_params.get('peak_rel_height', None)
             
             y_max = np.max(y_proc_for_peaks) if len(y_proc_for_peaks) > 0 else 0
             y_min = np.min(y_proc_for_peaks) if len(y_proc_for_peaks) > 0 else 0
             y_range = y_max - y_min
             
             peak_kwargs = {}
+            # 使用与_detect_and_plot_peaks相同的逻辑
             if peak_height == 0:
                 if y_max > 0:
-                    peak_height = y_max * 0.001
+                    peak_height = y_max * 0.0001
                 else:
                     peak_height = 0
             if peak_height > y_range * 2 and y_range > 0:
-                peak_height = y_max * 0.001
-            if peak_height != 0:
-                peak_kwargs['height'] = peak_height
+                peak_height = y_max * 0.0001
+            peak_kwargs['height'] = peak_height
             
             if peak_distance == 0:
                 peak_distance = max(1, int(len(y_proc_for_peaks) * 0.001))
@@ -4309,9 +4616,13 @@ class BatchPlotWindow(QDialog):
                 peak_distance = max(1, int(len(y_proc_for_peaks) * 0.001))
             peak_distance = max(1, peak_distance)
             
+            use_distance = True
             if peak_height < 0 or (y_max > 0 and peak_height < y_max * 0.001):
-                pass  # 不使用distance
-            else:
+                use_distance = False
+            elif peak_distance == 1:
+                use_distance = False
+            
+            if use_distance:
                 peak_kwargs['distance'] = peak_distance
             
             if peak_prominence is not None and peak_prominence != 0:
@@ -4319,11 +4630,24 @@ class BatchPlotWindow(QDialog):
                     peak_prominence = y_range * 0.001
                 peak_kwargs['prominence'] = peak_prominence
             
+            if peak_width is not None and peak_width > 0:
+                peak_kwargs['width'] = peak_width
+            
+            if peak_wlen is not None and peak_wlen > 0:
+                if peak_wlen > len(y_proc_for_peaks) * 0.5:
+                    peak_wlen = max(1, int(len(y_proc_for_peaks) * 0.3))
+                peak_kwargs['wlen'] = peak_wlen
+            
+            if peak_rel_height is not None and peak_rel_height > 0:
+                peak_kwargs['rel_height'] = peak_rel_height
+            
             try:
+                if len(peak_kwargs) == 0:
+                    peak_kwargs = {'height': y_max * 0.0001 if y_max > 0 else 0}
                 peaks_for_ref, properties = find_peaks(y_proc_for_peaks, **peak_kwargs)
             except:
                 peaks_for_ref, properties = find_peaks(y_proc_for_peaks, 
-                                                    height=y_max * 0.001 if y_max > 0 else 0,
+                                                    height=y_max * 0.0001 if y_max > 0 else 0,
                                                     distance=max(1, int(len(y_proc_for_peaks) * 0.001)))
             
             peak_wavenumbers_for_ref = x[peaks_for_ref] if len(peaks_for_ref) > 0 else np.array([])
@@ -5044,39 +5368,12 @@ class BatchPlotWindow(QDialog):
                 ax_spectrum = fig.add_subplot(gs[0])
                 ax_image = fig.add_subplot(gs[1])
                 
-                # 复用主窗口的预处理逻辑
-                from src.core.preprocessor import DataPreProcessor
+                # 使用统一的预处理方法（确保与主窗口一致）
+                y_proc = self._preprocess_spectrum(x, y, plot_params, file_path=txt_file)
                 
-                y_proc = y.astype(float)
-                
-                # 预处理（与plot_single_spectrum相同）
+                # QC检查
                 if plot_params.get('qc_enabled', False) and np.max(y_proc) < plot_params.get('qc_threshold', 5.0):
                     continue
-                
-                if plot_params.get('is_be_correction', False):
-                    y_proc = DataPreProcessor.apply_bose_einstein_correction(
-                        x, y_proc, plot_params.get('be_temp', 300.0)
-                    )
-                
-                if plot_params.get('is_smoothing', False):
-                    y_proc = DataPreProcessor.apply_smoothing(
-                        y_proc,
-                        plot_params.get('smoothing_window', 15),
-                        plot_params.get('smoothing_poly', 3)
-                    )
-                
-                if plot_params.get('is_baseline_als', False):
-                    b = DataPreProcessor.apply_baseline_als(
-                        y_proc,
-                        plot_params.get('als_lam', 10000),
-                        plot_params.get('als_p', 0.005)
-                    )
-                    y_proc = y_proc - b
-                    y_proc[y_proc < 0] = 0
-                
-                norm_mode = plot_params.get('normalization_mode', 'None')
-                if norm_mode != 'None':
-                    y_proc = DataPreProcessor.apply_normalization(y_proc, norm_mode.lower())
                 
                 # 绘制光谱
                 ax_spectrum.plot(x, y_proc, color='blue', linewidth=plot_params['line_width'],

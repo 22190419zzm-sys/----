@@ -34,6 +34,12 @@ class NMFResultWindow(QDialog):
     def __init__(self, title, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
+        # 设置窗口图标
+        try:
+            from src.utils.icon_manager import set_window_icon
+            set_window_icon(self)
+        except:
+            pass
         # 使用Window类型而不是Dialog，这样最小化后能显示窗口名称
         self.setWindowFlags(
             Qt.WindowType.Window |
@@ -322,8 +328,23 @@ class NMFResultWindow(QDialog):
                 'linestyle': style_params['comp_line_style']
             })
             
-            # 峰值检测（使用全局配置）
-            peak_config = global_config.peak_detection if global_config else None
+            # 峰值检测（优先使用子图独立配置，否则使用全局配置）
+            peak_config = None
+            # 尝试获取子图0的独立峰值检测配置
+            if self.parent():
+                if hasattr(self.parent(), '_style_matching_window') and self.parent()._style_matching_window:
+                    style_window = self.parent()._style_matching_window
+                    if hasattr(style_window, 'get_subplot_controller'):
+                        try:
+                            subplot0_controller = style_window.get_subplot_controller("NMFResultWindow", 0)
+                            if subplot0_controller and hasattr(subplot0_controller, 'get_peak_config'):
+                                peak_config = subplot0_controller.get_peak_config()
+                        except:
+                            pass
+            
+            # 如果没有子图独立配置，使用全局配置
+            if peak_config is None:
+                peak_config = global_config.peak_detection if global_config else None
             
             if peak_config and peak_config.enabled:
                     # 准备峰值检测参数
@@ -361,8 +382,23 @@ class NMFResultWindow(QDialog):
         # 保存子图0的绘图数据
         self.subplot_plot_data[0] = subplot0_plot_data
         
-        # 谱线扫描（子图0）- 使用全局配置
-        scan_config = global_config.spectrum_scan if global_config else None
+        # 谱线扫描（子图0）- 优先使用子图独立配置，否则使用全局配置
+        scan_config = None
+        # 尝试获取子图0的独立配置
+        if self.parent():
+            if hasattr(self.parent(), '_style_matching_window') and self.parent()._style_matching_window:
+                style_window = self.parent()._style_matching_window
+                if hasattr(style_window, 'get_subplot_controller'):
+                    try:
+                        subplot0_controller = style_window.get_subplot_controller("NMFResultWindow", 0)
+                        if subplot0_controller and hasattr(subplot0_controller, 'get_scan_config'):
+                            scan_config = subplot0_controller.get_scan_config()
+                    except:
+                        pass
+        
+        # 如果没有子图独立配置，使用全局配置
+        if scan_config is None:
+            scan_config = global_config.spectrum_scan if global_config else None
         
         if scan_config and scan_config.enabled and len(subplot0_plot_data) > 1:
             try:
@@ -564,10 +600,23 @@ class NMFResultWindow(QDialog):
         # 保存子图1的绘图数据
         self.subplot_plot_data[1] = subplot1_plot_data
         
-        # 谱线扫描（子图1）- 使用全局配置
+        # 谱线扫描（子图1）- 优先使用子图独立配置，否则使用全局配置
         scan_config1 = None
-        if global_config:
-            scan_config1 = global_config.spectrum_scan
+        # 尝试获取子图1的独立配置
+        if self.parent():
+            if hasattr(self.parent(), '_style_matching_window') and self.parent()._style_matching_window:
+                style_window = self.parent()._style_matching_window
+                if hasattr(style_window, 'get_subplot_controller'):
+                    try:
+                        subplot1_controller = style_window.get_subplot_controller("NMFResultWindow", 1)
+                        if subplot1_controller and hasattr(subplot1_controller, 'get_scan_config'):
+                            scan_config1 = subplot1_controller.get_scan_config()
+                    except:
+                        pass
+        
+        # 如果没有子图独立配置，使用全局配置
+        if scan_config1 is None:
+            scan_config1 = global_config.spectrum_scan if global_config else None
         
         if scan_config1 and scan_config1.enabled and len(subplot1_plot_data) > 1:
                 try:
@@ -658,8 +707,23 @@ class NMFResultWindow(QDialog):
             # 最后回退
             apply_publication_style_to_axes(ax1)
         
-        # 子图1样式 - 使用全局配置
-        if global_config:
+        # 子图1样式 - 优先使用子图独立样式，否则使用全局样式
+        subplot1_controller = None
+        try:
+            if self.parent():
+                parent = self.parent()
+                if hasattr(parent, '_style_matching_window') and parent._style_matching_window:
+                    style_window = parent._style_matching_window
+                    if hasattr(style_window, 'get_subplot_controller'):
+                        subplot1_controller = style_window.get_subplot_controller("NMFResultWindow", 1)
+        except Exception as e:
+            # 如果获取控制器失败，使用全局配置
+            print(f"获取子图1控制器失败: {e}")
+            subplot1_controller = None
+        
+        if subplot1_controller:
+            subplot1_controller.apply_style_to_axes(ax2)
+        elif global_config:
             # 使用全局样式
             apply_publication_style_to_axes(ax2, global_config)
         else:

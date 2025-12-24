@@ -25,6 +25,12 @@ class ProjectManagerDialog(QDialog):
     def __init__(self, parent=None, project_save_manager: Optional[ProjectSaveManager] = None):
         super().__init__(parent)
         self.setWindowTitle("项目管理")
+        # 设置窗口图标
+        try:
+            from src.utils.icon_manager import set_window_icon
+            set_window_icon(self)
+        except:
+            pass
         self.setMinimumSize(800, 600)
         self.resize(900, 700)
         

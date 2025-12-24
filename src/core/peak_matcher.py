@@ -37,6 +37,9 @@ class PeakMatcher:
         y_min = np.min(y_data)
         y_range = y_max - y_min
         
+        # 如果用户明确设置了height=0，使用自动计算
+        # 但如果用户设置了非零值，应该尊重用户的选择
+        original_height = height  # 保存原始值
         if height == 0:
             if y_max > 0:
                 height = y_max * 0.0001
@@ -44,8 +47,15 @@ class PeakMatcher:
                 y_mean = np.mean(y_data)
                 y_std = np.std(y_data)
                 height = abs(y_mean) + y_std * 0.05
-        
-        if height > y_range * 2 and y_range > 0:
+        # 只有当height明显不合理时才自动调整
+        # 但不要过于激进地调整，以免覆盖用户的合理设置
+        # 注意：如果用户明确设置了非零的height值，应该尽量尊重用户的选择
+        # 只有当height明显过大（超过数据范围的20倍，且大于y_max的2倍）时才自动调整，更宽松的条件
+        elif height > y_range * 20 and y_range > 0 and height > y_max * 2:
+            # 只有在height明显过大时才调整（从10倍改为20倍，更宽松）
+            # 并且只有当height大于y_max的2倍时才调整，避免误判
+            # 调试：打印调整信息（可选）
+            # print(f"[DEBUG] 峰值检测height参数被自动调整: 原始值={original_height}, 调整后={y_max * 0.0001}, y_max={y_max}, y_range={y_range}")
             height = y_max * 0.0001
         
         peak_kwargs['height'] = height
@@ -69,7 +79,8 @@ class PeakMatcher:
         
         # 添加可选参数
         if prominence is not None and prominence != 0:
-            if prominence > y_range * 2 and y_range > 0:
+            # 只有当prominence明显不合理时才自动调整（从2倍改为10倍，更宽松）
+            if prominence > y_range * 10 and y_range > 0:
                 prominence = y_range * 0.001
             peak_kwargs['prominence'] = prominence
         
